@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Room Join System</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #111; color: #eee; text-align: center; padding: 40px; }
+    input, button { padding: 10px; margin: 5px; border-radius: 6px; border: none; }
+    button { background: #28a745; color: white; cursor: pointer; }
+    button:hover { background: #218838; }
+    #roomInfo { margin-top: 20px; padding: 15px; background: #222; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Room System</h1>
+
+  <div>
+    <button onclick="createRoom()">Create Room</button>
+  </div>
+
+  <div style="margin-top:20px;">
+    <input id="joinCode" placeholder="Enter Join Code" />
+    <input id="playerName" placeholder="Enter Name" />
+    <button onclick="joinRoom()">Join Room</button>
+  </div>
+
+  <div id="roomInfo"></div>
+
+  <script>
+    const socket = io();
+    let currentRoom = null;
+
+    async function createRoom() {
+      const res = await fetch("/create", { method: "POST" });
+      const data = await res.json();
+      currentRoom = data.joinCode;
+      document.getElementById("roomInfo").innerHTML =
+        `<h3>Room Created</h3><p>Join Code: <b>${data.joinCode}</b></p>`;
+    }
+
+    async function joinRoom() {
+      const code = document.getElementById("joinCode").value.trim().toUpperCase();
+      const playerName = document.getElementById("playerName").value.trim();
+      if (!code || !playerName) {
+        alert("Enter join code and name!");
+        return;
+      }
+
+      // Call backend to validate room
+      const res = await fetch("/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, playerName })
+      });
+
+      if (res.status !== 200) {
+        alert("Room not found!");
+        return;
+      }
+
+      currentRoom = code;
+      socket.emit("joinRoom", { code, playerName });
+    }
+
+    socket.on("playerList", (players) => {
+      document.getElementById("roomInfo").innerHTML =
+        `<h3>Room: ${currentRoom}</h3><p>Players: ${players.join(", ")}</p>`;
+    });
+
+    socket.on("errorMsg", (msg) => alert(msg));
+  </script>
+</body>
+</html>
