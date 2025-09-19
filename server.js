@@ -9,31 +9,26 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = process.env.PORT || 10000;
-
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-// In-memory rooms (NOTE: not shared across multiple server instances)
-const rooms = {}; 
-// rooms[code] = { owner: socketId, players: { socketId: { id, name, score } }, started:false, currentQuestion:null, timer:null }
+const rooms = {}; // in-memory. Use Redis for persistence across processes.
 
 function genCode() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// REST: create room (returns code)
+// REST create: returns a code (owner still assigned on socket join)
 app.post("/api/create", (req, res) => {
   const { name } = req.body || {};
   if (!name) return res.status(400).json({ error: "Missing name" });
-
   const code = genCode();
   rooms[code] = { owner: null, players: {}, started: false, currentQuestion: null, timer: null };
-  // do not assign owner here — owner gets assigned on socket join (less racey)
   return res.json({ code });
 });
 
-// REST: check/join room before socket join (validate)
+// REST join validation (fast fail)
 app.post("/api/join", (req, res) => {
   let { code, name } = req.body || {};
   if (!code || !name) return res.status(400).json({ error: "Missing code or name" });
@@ -41,65 +36,52 @@ app.post("/api/join", (req, res) => {
   const room = rooms[code];
   if (!room) return res.status(404).json({ error: "Room not found" });
   if (room.started) return res.status(400).json({ error: "Game already started" });
-  // name collision
-  const taken = Object.values(room.players).some(p => p.name === name);
-  if (taken) return res.status(409).json({ error: "Name already taken" });
+  if (Object.values(room.players).some(p => p.name === name)) return res.status(409).json({ error: "Name taken" });
   return res.json({ ok: true });
 });
 
-// debug endpoint
-app.get("/api/rooms", (req, res) => res.json(rooms));
+app.get("/api/rooms", (req, res) => res.json(rooms)); // debug
 
-// ---------- Socket handlers ----------
 io.on("connection", (socket) => {
   console.log("socket connected:", socket.id);
 
-  // Client requests to join after REST validation
+  // Socket create flow (fallback)
+  socket.on("createRoomSocket", ({ name }, cb) => {
+    if (!name) return cb?.({ success:false, message: "Missing name" });
+    const code = genCode();
+    rooms[code] = { owner: socket.id, players: { [socket.id]: { id: socket.id, name, score: 0 } }, started:false, currentQuestion:null, timer:null };
+    socket.join(code);
+    io.to(code).emit("playerList", { players: Object.values(rooms[code].players), owner: rooms[code].owner });
+    return cb?.({ success:true, code, owner: rooms[code].owner, players: Object.values(rooms[code].players) });
+  });
+
+  // Join after REST validation (or direct)
+  // payload: { code, name, isOwner }
   socket.on("joinRoom", ({ code, name, isOwner }, cb) => {
     if (!code || !name) {
-      cb?.({ success: false, message: "Missing code or name" });
-      return;
+      return cb?.({ success:false, message:"Missing code or name" });
     }
     code = String(code).trim().toUpperCase();
     const room = rooms[code];
-    if (!room) {
-      cb?.({ success: false, message: "Room not found" });
-      return;
-    }
-    if (room.started) {
-      cb?.({ success: false, message: "Game already started" });
-      return;
-    }
-    // duplicate name
-    if (Object.values(room.players).some(p => p.name === name)) {
-      cb?.({ success: false, message: "Name already taken in room" });
-      return;
+    if (!room) return cb?.({ success:false, message:"Room not found" });
+    if (room.started) return cb?.({ success:false, message:"Game already started" });
+    if (Object.values(room.players).some(p => p.name === name)) return cb?.({ success:false, message:"Name already taken" });
+
+    if (isOwner) {
+      // assign owner to this socket
+      room.owner = socket.id;
     }
 
-    // If this socket is owner (owner clicks create and then joins), assign
-    if (isOwner) room.owner = socket.id;
-
-    // Add player
     room.players[socket.id] = { id: socket.id, name, score: 0 };
     socket.join(code);
 
-    // Broadcast updated list + owner id so clients can decide who sees owner UI
+    // broadcast player list & owner id
     io.to(code).emit("playerList", { players: Object.values(room.players), owner: room.owner });
 
-    cb?.({ success: true, code });
+    return cb?.({ success:true, code, owner: room.owner, players: Object.values(room.players) });
   });
 
-  // Same safe create path using socket (if client prefers socket flow)
-  socket.on("createRoomSocket", ({ name }, cb) => {
-    if (!name) { cb?.({ success:false, message:"Missing name" }); return; }
-    const code = genCode();
-    rooms[code] = { owner: socket.id, players: { [socket.id]: { id: socket.id, name, score:0 } }, started:false, currentQuestion:null, timer:null };
-    socket.join(code);
-    io.to(code).emit("playerList", { players: Object.values(rooms[code].players), owner: rooms[code].owner });
-    cb?.({ success: true, code });
-  });
-
-  // Kick
+  // Kick (owner only)
   socket.on("kickPlayer", ({ code, targetId }) => {
     const room = rooms[code];
     if (!room) return socket.emit("errorMsg", "Room not found");
@@ -111,20 +93,19 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Start game
+  // Start game -> redirect everyone to game page
   socket.on("startGame", (code) => {
     const room = rooms[code];
-    if (!room) return;
+    if (!room) return socket.emit("errorMsg", "Room not found");
     if (room.owner !== socket.id) return socket.emit("errorMsg", "Only owner can start");
     room.started = true;
     io.to(code).emit("goToGamePage");
-    // Also emit full playerList so game page can display initial scores
+    // send fresh player list too
     io.to(code).emit("playerList", { players: Object.values(room.players), owner: room.owner });
   });
 
-  // Quiz: createQuestion, submitAnswer, endQuestionNow
-  socket.on("createQuestion", (payload) => {
-    const { code, question, options, correctIndexes, duration, points } = payload || {};
+  // Quiz: createQuestion
+  socket.on("createQuestion", ({ code, question, options, correctIndexes, duration, points }) => {
     const room = rooms[code];
     if (!room) return socket.emit("errorMsg", "Room not found");
     if (room.owner !== socket.id) return socket.emit("errorMsg", "Only owner can create questions");
@@ -135,7 +116,6 @@ io.on("connection", (socket) => {
     room.currentQuestion = { question, options, correctIndexes: (correctIndexes||[]).map(Number), duration: dur, points: pts, answers: {} };
     io.to(code).emit("questionStarted", { question, options, duration: dur });
 
-    // timer
     if (room.timer) clearTimeout(room.timer);
     room.timer = setTimeout(()=> finishQuestion(code), dur*1000);
   });
@@ -144,23 +124,23 @@ io.on("connection", (socket) => {
     const room = rooms[code];
     if (!room || !room.currentQuestion) return socket.emit("errorMsg", "No active question");
     if (room.currentQuestion.answers[socket.id]) return socket.emit("errorMsg", "Already answered");
-    room.currentQuestion.answers[socket.id] = (Array.isArray(selections) ? selections.map(Number) : [Number(selections)]);
-    if (room.owner) io.to(room.owner).emit("playerAnswered", { id: socket.id, name: room.players[socket.id]?.name });
+    room.currentQuestion.answers[socket.id] = Array.isArray(selections) ? selections.map(Number) : [Number(selections)];
+    if (room.owner && io.sockets.sockets.get(room.owner)) {
+      io.to(room.owner).emit("playerAnswered", { id: socket.id, name: room.players[socket.id]?.name });
+    }
   });
 
   socket.on("endQuestionNow", (code) => {
     const room = rooms[code];
-    if (!room || room.owner !== socket.id) return socket.emit("errorMsg", "Only owner can end question");
+    if (!room || room.owner !== socket.id) return socket.emit("errorMsg", "Only owner can end");
     finishQuestion(code);
   });
 
   socket.on("disconnect", () => {
-    // remove from any room they were in
     for (const code of Object.keys(rooms)) {
       const room = rooms[code];
       if (room.players[socket.id]) {
         delete room.players[socket.id];
-        // if owner left -> close room
         if (room.owner === socket.id) {
           if (room.timer) clearTimeout(room.timer);
           io.to(code).emit("roomClosed");
@@ -173,7 +153,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // helper to finish
+  // helper: finish & grade question
   function finishQuestion(code) {
     const room = rooms[code];
     if (!room || !room.currentQuestion) return;
@@ -205,6 +185,7 @@ io.on("connection", (socket) => {
     io.to(code).emit("leaderboard", leaderboard);
     io.to(code).emit("playerList", { players: Object.values(room.players), owner: room.owner });
   }
+
 });
 
 server.listen(PORT, () => console.log(`Server listening on ${PORT}`));
