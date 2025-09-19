@@ -8,86 +8,102 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
+
+app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-// rooms: keyed by join code
-// rooms[code] = {
-//   owner: socketId,
-//   players: { socketId: { id, name, score } },
-//   started: false,
-//   currentQuestion: null,
-//   timer: null
-// }
-const rooms = {};
+// In-memory rooms (NOTE: not shared across multiple server instances)
+const rooms = {}; 
+// rooms[code] = { owner: socketId, players: { socketId: { id, name, score } }, started:false, currentQuestion:null, timer:null }
 
+function genCode() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+// REST: create room (returns code)
+app.post("/api/create", (req, res) => {
+  const { name } = req.body || {};
+  if (!name) return res.status(400).json({ error: "Missing name" });
+
+  const code = genCode();
+  rooms[code] = { owner: null, players: {}, started: false, currentQuestion: null, timer: null };
+  // do not assign owner here — owner gets assigned on socket join (less racey)
+  return res.json({ code });
+});
+
+// REST: check/join room before socket join (validate)
+app.post("/api/join", (req, res) => {
+  let { code, name } = req.body || {};
+  if (!code || !name) return res.status(400).json({ error: "Missing code or name" });
+  code = String(code).trim().toUpperCase();
+  const room = rooms[code];
+  if (!room) return res.status(404).json({ error: "Room not found" });
+  if (room.started) return res.status(400).json({ error: "Game already started" });
+  // name collision
+  const taken = Object.values(room.players).some(p => p.name === name);
+  if (taken) return res.status(409).json({ error: "Name already taken" });
+  return res.json({ ok: true });
+});
+
+// debug endpoint
+app.get("/api/rooms", (req, res) => res.json(rooms));
+
+// ---------- Socket handlers ----------
 io.on("connection", (socket) => {
-  console.log("Connected:", socket.id);
+  console.log("socket connected:", socket.id);
 
-  // Create room (owner)
-  socket.on("createRoom", (name, callback) => {
-    const code = Math.random().toString(36).substring(2, 7).toUpperCase();
-    rooms[code] = {
-      owner: socket.id,
-      players: { [socket.id]: { id: socket.id, name, score: 0 } },
-      started: false,
-      currentQuestion: null,
-      timer: null
-    };
-    socket.join(code);
-    // send player list with owner id
-    io.to(code).emit("playerList", { players: Object.values(rooms[code].players), owner: rooms[code].owner });
-    callback?.({ success: true, code });
-  });
-
-  // Join room (player or owner reconnect)
-  // Accepts { code, name, isOwner }
-  socket.on("joinRoom", ({ code, name, isOwner }, callback) => {
+  // Client requests to join after REST validation
+  socket.on("joinRoom", ({ code, name, isOwner }, cb) => {
     if (!code || !name) {
-      callback?.({ success: false, message: "Missing code or name" });
+      cb?.({ success: false, message: "Missing code or name" });
       return;
     }
     code = String(code).trim().toUpperCase();
     const room = rooms[code];
     if (!room) {
-      callback?.({ success: false, message: "Room not found" });
+      cb?.({ success: false, message: "Room not found" });
       return;
     }
     if (room.started) {
-      callback?.({ success: false, message: "Game already started" });
+      cb?.({ success: false, message: "Game already started" });
+      return;
+    }
+    // duplicate name
+    if (Object.values(room.players).some(p => p.name === name)) {
+      cb?.({ success: false, message: "Name already taken in room" });
       return;
     }
 
-    // Prevent duplicate names in same room
-    const nameTaken = Object.values(room.players).some(p => p.name === name);
-    if (nameTaken) {
-      callback?.({ success: false, message: "Name already taken in this room" });
-      return;
-    }
-
-    // If client claims to be owner, assign ownership to this socket
-    if (isOwner) {
-      room.owner = socket.id;
-    }
+    // If this socket is owner (owner clicks create and then joins), assign
+    if (isOwner) room.owner = socket.id;
 
     // Add player
     room.players[socket.id] = { id: socket.id, name, score: 0 };
     socket.join(code);
 
-    // broadcast updated players + owner id
+    // Broadcast updated list + owner id so clients can decide who sees owner UI
     io.to(code).emit("playerList", { players: Object.values(room.players), owner: room.owner });
-    callback?.({ success: true, code });
+
+    cb?.({ success: true, code });
   });
 
-  // Kick player (owner only)
+  // Same safe create path using socket (if client prefers socket flow)
+  socket.on("createRoomSocket", ({ name }, cb) => {
+    if (!name) { cb?.({ success:false, message:"Missing name" }); return; }
+    const code = genCode();
+    rooms[code] = { owner: socket.id, players: { [socket.id]: { id: socket.id, name, score:0 } }, started:false, currentQuestion:null, timer:null };
+    socket.join(code);
+    io.to(code).emit("playerList", { players: Object.values(rooms[code].players), owner: rooms[code].owner });
+    cb?.({ success: true, code });
+  });
+
+  // Kick
   socket.on("kickPlayer", ({ code, targetId }) => {
     const room = rooms[code];
-    if (!room) return;
-    if (room.owner !== socket.id) {
-      socket.emit("errorMsg", "Only the owner can kick players.");
-      return;
-    }
+    if (!room) return socket.emit("errorMsg", "Room not found");
+    if (room.owner !== socket.id) return socket.emit("errorMsg", "Only owner can kick");
     if (room.players[targetId]) {
       delete room.players[targetId];
       io.to(targetId).emit("kicked");
@@ -95,99 +111,61 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Owner starts game (only then redirect to game page)
+  // Start game
   socket.on("startGame", (code) => {
     const room = rooms[code];
     if (!room) return;
-    if (room.owner !== socket.id) {
-      socket.emit("errorMsg", "Only owner can start the game.");
-      return;
-    }
+    if (room.owner !== socket.id) return socket.emit("errorMsg", "Only owner can start");
     room.started = true;
-    io.to(code).emit("goToGamePage"); // lobby clients redirect when they receive this
+    io.to(code).emit("goToGamePage");
+    // Also emit full playerList so game page can display initial scores
+    io.to(code).emit("playerList", { players: Object.values(room.players), owner: room.owner });
   });
 
-  // Owner creates question
-  socket.on("createQuestion", ({ code, question, options, correctIndexes, duration, points }) => {
+  // Quiz: createQuestion, submitAnswer, endQuestionNow
+  socket.on("createQuestion", (payload) => {
+    const { code, question, options, correctIndexes, duration, points } = payload || {};
     const room = rooms[code];
-    if (!room || room.owner !== socket.id) {
-      socket.emit("errorMsg", "Only owner can create questions.");
-      return;
-    }
-    if (room.currentQuestion) {
-      socket.emit("errorMsg", "A question is already running.");
-      return;
-    }
-    // sanitize/set defaults
-    duration = Math.max(1, Math.floor(duration || 10));
-    points = Math.max(0, Math.floor(points || 1));
-    correctIndexes = Array.isArray(correctIndexes) ? correctIndexes.map(Number) : [];
+    if (!room) return socket.emit("errorMsg", "Room not found");
+    if (room.owner !== socket.id) return socket.emit("errorMsg", "Only owner can create questions");
+    if (room.currentQuestion) return socket.emit("errorMsg", "Question already active");
 
-    room.currentQuestion = {
-      question,
-      options,
-      correctIndexes,
-      duration,
-      points,
-      answers: {} // socketId -> selections array
-    };
+    const dur = Math.max(1, Math.floor(duration||10));
+    const pts = Math.max(0, Math.floor(points||1));
+    room.currentQuestion = { question, options, correctIndexes: (correctIndexes||[]).map(Number), duration: dur, points: pts, answers: {} };
+    io.to(code).emit("questionStarted", { question, options, duration: dur });
 
-    // broadcast start
-    io.to(code).emit("questionStarted", { question, options, duration });
-
-    // set timer
+    // timer
     if (room.timer) clearTimeout(room.timer);
-    room.timer = setTimeout(() => finishQuestion(code), duration * 1000);
+    room.timer = setTimeout(()=> finishQuestion(code), dur*1000);
   });
 
-  // Player submits answer
   socket.on("submitAnswer", ({ code, selections }) => {
     const room = rooms[code];
-    if (!room || !room.currentQuestion) {
-      socket.emit("errorMsg", "No active question.");
-      return;
-    }
-    // prevent multiple submits from same player
-    if (room.currentQuestion.answers[socket.id]) {
-      socket.emit("errorMsg", "You already answered.");
-      return;
-    }
-    // store selection
-    room.currentQuestion.answers[socket.id] = Array.isArray(selections) ? selections.map(Number) : [Number(selections)];
-    // optionally notify owner someone answered
-    if (room.owner && io.sockets.sockets.get(room.owner)) {
-      io.to(room.owner).emit("playerAnswered", { id: socket.id, name: room.players[socket.id]?.name || "Unknown" });
-    }
+    if (!room || !room.currentQuestion) return socket.emit("errorMsg", "No active question");
+    if (room.currentQuestion.answers[socket.id]) return socket.emit("errorMsg", "Already answered");
+    room.currentQuestion.answers[socket.id] = (Array.isArray(selections) ? selections.map(Number) : [Number(selections)]);
+    if (room.owner) io.to(room.owner).emit("playerAnswered", { id: socket.id, name: room.players[socket.id]?.name });
   });
 
-  // Owner can force end question early
   socket.on("endQuestionNow", (code) => {
     const room = rooms[code];
-    if (!room || room.owner !== socket.id) {
-      socket.emit("errorMsg", "Only owner can end the question.");
-      return;
-    }
+    if (!room || room.owner !== socket.id) return socket.emit("errorMsg", "Only owner can end question");
     finishQuestion(code);
   });
 
-  // Disconnect handling
   socket.on("disconnect", () => {
-    // find room that contains this socket
-    for (const code in rooms) {
+    // remove from any room they were in
+    for (const code of Object.keys(rooms)) {
       const room = rooms[code];
-      if (!room) continue;
       if (room.players[socket.id]) {
-        // remove player
         delete room.players[socket.id];
-
-        // if owner left, close room and notify
+        // if owner left -> close room
         if (room.owner === socket.id) {
-          // clear timer
           if (room.timer) clearTimeout(room.timer);
           io.to(code).emit("roomClosed");
           delete rooms[code];
         } else {
-          // broadcast updated player list
           io.to(code).emit("playerList", { players: Object.values(room.players), owner: room.owner });
         }
         break;
@@ -195,15 +173,11 @@ io.on("connection", (socket) => {
     }
   });
 
-  // helper to finish a question (grade & award points)
+  // helper to finish
   function finishQuestion(code) {
     const room = rooms[code];
     if (!room || !room.currentQuestion) return;
-
-    if (room.timer) {
-      clearTimeout(room.timer);
-      room.timer = null;
-    }
+    if (room.timer) { clearTimeout(room.timer); room.timer = null; }
 
     const cq = room.currentQuestion;
     const correctSet = new Set(cq.correctIndexes.map(Number));
@@ -211,15 +185,12 @@ io.on("connection", (socket) => {
 
     for (const pid in room.players) {
       const player = room.players[pid];
-      const given = cq.answers[pid] || [];
-      const givenSet = new Set(given.map(Number));
-
-      // correct if sets are identical
+      const sels = cq.answers[pid] || [];
+      const selsSet = new Set(sels.map(Number));
       let isCorrect = false;
-      if (givenSet.size === correctSet.size) {
-        isCorrect = [...correctSet].every(i => givenSet.has(i));
+      if (selsSet.size === correctSet.size) {
+        isCorrect = [...correctSet].every(i => selsSet.has(i));
       }
-
       let awarded = 0;
       if (isCorrect) {
         player.score = (player.score || 0) + cq.points;
@@ -228,16 +199,12 @@ io.on("connection", (socket) => {
       results.push({ id: pid, name: player.name, correct: isCorrect, awarded });
     }
 
-    // clear currentQuestion
     room.currentQuestion = null;
-
-    // broadcast results and leaderboard
     io.to(code).emit("questionEnded", { results, correctIndexes: Array.from(correctSet) });
     const leaderboard = Object.values(room.players).sort((a,b)=> (b.score||0) - (a.score||0));
     io.to(code).emit("leaderboard", leaderboard);
-    // also send updated player list
     io.to(code).emit("playerList", { players: Object.values(room.players), owner: room.owner });
   }
 });
 
-server.listen(PORT, () => console.log(`Server running on ${PORT}`));
+server.listen(PORT, () => console.log(`Server listening on ${PORT}`));
