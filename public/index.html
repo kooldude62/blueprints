@@ -1,184 +1,175 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Blooket-Style Lobby</title>
+  <meta charset="utf-8"/>
+  <title>Lobby</title>
+  <script src="/socket.io/socket.io.js"></script>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: linear-gradient(135deg, #667eea, #764ba2);
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
-      margin: 0;
-      color: white;
-    }
-    .container {
-      background: rgba(0,0,0,0.6);
-      padding: 30px;
-      border-radius: 15px;
-      width: 420px;
-      text-align: center;
-      box-shadow: 0 6px 12px rgba(0,0,0,0.3);
-    }
-    h1 {
-      margin-bottom: 20px;
-    }
-    input {
-      width: 80%;
-      padding: 10px;
-      margin: 10px 0;
-      border: none;
-      border-radius: 8px;
-      font-size: 16px;
-    }
-    button {
-      padding: 10px 20px;
-      margin: 10px;
-      border: none;
-      border-radius: 8px;
-      font-size: 16px;
-      cursor: pointer;
-      background: #ffca28;
-      color: #333;
-      transition: background 0.2s;
-    }
-    button:hover {
-      background: #ffc107;
-    }
-    #error {
-      color: #ff7777;
-      margin-top: 10px;
-      font-weight: bold;
-      display: none;
-    }
-    #lobby {
-      display: none;
-      margin-top: 20px;
-    }
-    #roomCodeDisplay {
-      font-size: 22px;
-      font-weight: bold;
-      margin: 15px 0;
-    }
-    ul {
-      list-style: none;
-      padding: 0;
-      margin: 10px 0;
-      max-height: 150px;
-      overflow-y: auto;
-    }
-    li {
-      margin: 5px 0;
-      padding: 5px 10px;
-      background: rgba(255,255,255,0.1);
-      border-radius: 6px;
-    }
+    body { font-family: Arial, sans-serif; background: linear-gradient(135deg,#667eea,#764ba2); color: #fff; display:flex; align-items:center; justify-content:center; height:100vh; margin:0;}
+    .card { background: rgba(0,0,0,0.45); padding:24px; border-radius:12px; width:420px; text-align:center;}
+    input { width:80%; padding:10px; margin:8px 0; border-radius:8px; border:none; }
+    button { padding:10px 16px; margin:6px; border-radius:8px; border:none; cursor:pointer; background:#ffca28; color:#222; }
+    #lobbyUI { display:none; margin-top:12px; text-align:left; }
+    .playerBox { background:#071427; padding:8px; margin:6px 0; border-radius:6px; display:flex; justify-content:space-between; align-items:center; }
+    .ownerBadge { color:#ffd700; font-weight:bold; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>Blooket Lobby</h1>
-    <div id="joinForm">
-      <input id="playerName" type="text" placeholder="Enter your name"><br>
-      <button id="createBtn">Create Room</button>
-      <br>
-      <input id="roomCode" type="text" placeholder="Enter Room Code"><br>
+  <div class="card">
+    <h2>Quiz Lobby</h2>
+
+    <div id="joinUI">
+      <input id="playerName" placeholder="Your name" /><br>
+      <button id="createBtn">Create Room</button><br>
+      <input id="roomCodeInput" placeholder="Enter room code to join" /><br>
       <button id="joinBtn">Join Room</button>
-      <p id="error"></p>
+      <p id="error" style="color:#ffaaaa; display:none;"></p>
     </div>
 
-    <div id="lobby">
-      <p>Share this code with friends:</p>
-      <div id="roomCodeDisplay"></div>
-      <h3>Players in Room:</h3>
-      <ul id="playersList"></ul>
-      <button id="startBtn" style="display:none;">Start Game</button>
+    <div id="lobbyUI">
+      <div><strong>Room Code:</strong> <span id="roomCodeDisplay"></span></div>
+      <div id="playersList" style="margin-top:12px;"></div>
+      <div style="margin-top:10px;">
+        <button id="startBtn" style="display:none;">Start Game</button>
+      </div>
     </div>
   </div>
 
-  <script src="/socket.io/socket.io.js"></script>
   <script>
     const socket = io();
+    const createBtn = document.getElementById("createBtn");
+    const joinBtn = document.getElementById("joinBtn");
+    const playerNameInput = document.getElementById("playerName");
+    const roomCodeInput = document.getElementById("roomCodeInput");
     const errorBox = document.getElementById("error");
-    const joinForm = document.getElementById("joinForm");
-    const lobby = document.getElementById("lobby");
+    const lobbyUI = document.getElementById("lobbyUI");
+    const joinUI = document.getElementById("joinUI");
+    const roomCodeDisplay = document.getElementById("roomCodeDisplay");
     const playersList = document.getElementById("playersList");
     const startBtn = document.getElementById("startBtn");
-    let roomCode = null;
-    let playerName = null;
-    let isOwner = false;
 
-    // Create Room
-    document.getElementById("createBtn").onclick = () => {
-      playerName = document.getElementById("playerName").value.trim();
-      if (!playerName) return showError("Enter your name");
-      socket.emit("createRoom", playerName, (res) => {
-        if (res.success) {
-          roomCode = res.code;
-          isOwner = true;
-          showLobby();
+    let currentRoom = null;
+    let amOwner = false;
+
+    createBtn.onclick = () => {
+      const name = playerNameInput.value.trim();
+      if (!name) return showError("Enter your name");
+      socket.emit("createRoom", name, (res) => {
+        if (res?.success) {
+          currentRoom = res.code;
+          amOwner = true;
+          enterLobby();
+          localStorage.setItem("roomCode", currentRoom);
+          localStorage.setItem("playerName", name);
+          localStorage.setItem("isOwner", "true");
         } else {
           showError("Could not create room");
         }
       });
     };
 
-    // Join Room
-    document.getElementById("joinBtn").onclick = () => {
-      playerName = document.getElementById("playerName").value.trim();
-      const code = document.getElementById("roomCode").value.trim().toUpperCase();
-      if (!playerName || !code) return showError("Enter name + code");
-      socket.emit("joinRoom", { code, name: playerName }, (res) => {
-        if (res.success) {
-          roomCode = code;
-          isOwner = false;
-          showLobby();
+    joinBtn.onclick = () => {
+      const name = playerNameInput.value.trim();
+      const code = (roomCodeInput.value || "").trim().toUpperCase();
+      if (!name || !code) return showError("Enter name and code");
+      socket.emit("joinRoom", { code, name, isOwner: false }, (res) => {
+        if (res?.success) {
+          currentRoom = res.code;
+          amOwner = false;
+          enterLobby();
+          localStorage.setItem("roomCode", currentRoom);
+          localStorage.setItem("playerName", name);
+          localStorage.setItem("isOwner", "false");
         } else {
-          showError(res.message || "Room not found");
+          showError(res?.message || "Room not found");
         }
       });
     };
 
-    // Update player list
-    socket.on("playerList", (data) => {
+    function enterLobby() {
+      joinUI.style.display = "none";
+      lobbyUI.style.display = "block";
+      roomCodeDisplay.innerText = currentRoom;
+      startBtn.style.display = amOwner ? "inline-block" : "none";
+    }
+
+    socket.on("playerList", ({ players, owner }) => {
+      // show players
       playersList.innerHTML = "";
-      data.players.forEach(p => {
-        const li = document.createElement("li");
-        li.textContent = p.name + (p.id === socket.id ? " (You)" : "");
-        playersList.appendChild(li);
+      players.forEach(p => {
+        const div = document.createElement("div");
+        div.className = "playerBox";
+        div.innerHTML = `<div>${p.name}</div><div>${p.score ?? 0}${p.id === owner ? " <span class='ownerBadge'>(Owner)</span>" : ""}</div>`;
+        // if I'm owner, show kick buttons
+        const meIsOwner = (localStorage.getItem("isOwner")==="true") && owner === socket.id;
+        if (owner === socket.id && localStorage.getItem("isOwner")==="true") {
+          // ownerUI showing start button is handled by startBtn; kick button logic below
+        }
+        if (localStorage.getItem("isOwner")==="true" && owner === socket.id && p.id !== socket.id) {
+          const kick = document.createElement("button");
+          kick.innerText = "Kick";
+          kick.onclick = () => socket.emit("kickPlayer", { code: currentRoom, targetId: p.id });
+          div.appendChild(kick);
+        }
+        playersList.appendChild(div);
       });
     });
 
-    // Game started → redirect
-    socket.on("gameStarted", () => {
-      saveAndGo();
-    });
-
-    // Start Game button (owner only)
     startBtn.onclick = () => {
-      socket.emit("startGame", roomCode);
+      if (!currentRoom) return;
+      socket.emit("startGame", currentRoom);
     };
 
-    function showLobby() {
-      joinForm.style.display = "none";
-      lobby.style.display = "block";
-      document.getElementById("roomCodeDisplay").textContent = roomCode;
-      if (isOwner) startBtn.style.display = "inline-block";
-    }
+    // redirect lobby -> game
+    socket.on("goToGamePage", () => {
+      // store required info and redirect
+      window.location.href = "/game.html";
+    });
 
-    function saveAndGo() {
-      localStorage.setItem("roomCode", roomCode);
-      localStorage.setItem("playerName", playerName);
-      localStorage.setItem("isOwner", isOwner ? "true" : "false");
-      window.location.href = "game.html";
-    }
+    socket.on("kicked", () => {
+      alert("You were kicked from the room");
+      localStorage.removeItem("roomCode");
+      localStorage.removeItem("playerName");
+      localStorage.removeItem("isOwner");
+      location.reload();
+    });
+
+    socket.on("roomClosed", () => {
+      alert("Room closed (owner left)");
+      localStorage.removeItem("roomCode");
+      localStorage.removeItem("playerName");
+      localStorage.removeItem("isOwner");
+      location.reload();
+    });
 
     function showError(msg) {
-      errorBox.textContent = msg;
+      errorBox.innerText = msg;
       errorBox.style.display = "block";
+      setTimeout(()=> errorBox.style.display = "none", 4000);
     }
+
+    // Auto rejoin if localStorage present
+    (function tryAutoRejoin() {
+      const savedCode = localStorage.getItem("roomCode");
+      const savedName = localStorage.getItem("playerName");
+      const savedOwner = localStorage.getItem("isOwner") === "true";
+      if (savedCode && savedName) {
+        currentRoom = savedCode;
+        playerNameInput.value = savedName;
+        // emit joinRoom and pass isOwner so server reassigns owner if appropriate
+        socket.emit("joinRoom", { code: savedCode, name: savedName, isOwner: savedOwner }, (res) => {
+          if (res?.success) {
+            amOwner = savedOwner;
+            enterLobby();
+          } else {
+            // clear invalid saved state
+            localStorage.removeItem("roomCode");
+            localStorage.removeItem("playerName");
+            localStorage.removeItem("isOwner");
+          }
+        });
+      }
+    })();
   </script>
 </body>
 </html>
