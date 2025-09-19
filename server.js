@@ -2,119 +2,156 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
+const crypto = require("crypto");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-const rooms = {}; // { CODE: { players, owner, started, _ownerTimeout } }
+const rooms = {}; // { CODE: { ownerId, players:[{id,name,score}], started:false } }
 
-function generateRoomCode() {
-  return Math.random().toString(36).substring(2, 6).toUpperCase();
+// generate random 4-letter code
+function genCode() {
+  return crypto.randomBytes(2).toString("hex").toUpperCase();
 }
 
-io.on("connection", (socket) => {
-  console.log("New client connected", socket.id);
+// REST: create room
+app.post("/api/create", (req, res) => {
+  const name = req.body.name?.trim();
+  if (!name) return res.status(400).json({ error: "Missing name" });
 
-  // Create room
-  socket.on("createRoom", ({ name }, cb) => {
-    const code = generateRoomCode();
+  let code;
+  do {
+    code = genCode();
+  } while (rooms[code]);
+
+  rooms[code] = {
+    ownerId: null, // assigned later when socket joins
+    players: [],
+    started: false,
+    currentQ: null,
+  };
+
+  res.json({ code });
+});
+
+// REST: join validation
+app.post("/api/join", (req, res) => {
+  const code = String(req.body.code || "").toUpperCase();
+  const name = req.body.name?.trim();
+  if (!rooms[code]) return res.status(404).json({ error: "Room not found" });
+  if (!name) return res.status(400).json({ error: "Missing name" });
+  res.json({ ok: true });
+});
+
+// --- socket.io ---
+io.on("connection", (socket) => {
+  console.log("connected", socket.id);
+
+  socket.on("createRoomSocket", ({ name }, cb) => {
+    const code = genCode();
     rooms[code] = {
-      players: { [socket.id]: { id: socket.id, name, score: 0 } },
-      owner: socket.id,
+      ownerId: socket.id,
+      players: [{ id: socket.id, name, score: 0 }],
       started: false,
+      currentQ: null,
     };
     socket.join(code);
-    console.log("Room created:", code);
-    cb?.({ success: true, code });
+    cb({ success: true, code });
+    io.to(code).emit("playerList", { players: rooms[code].players, owner: rooms[code].ownerId });
   });
 
-  // Join existing room
-  socket.on("joinRoom", ({ code, name }, cb) => {
-    code = String(code).trim().toUpperCase();
+  socket.on("joinRoom", ({ code, name, isOwner }, cb) => {
+    code = String(code || "").toUpperCase();
+    if (!rooms[code]) return cb({ success: false, message: "Room not found" });
     const room = rooms[code];
-    if (!room) return cb?.({ success: false, message: "Room not found" });
-    if (room.started) return cb?.({ success: false, message: "Game already started" });
+    if (room.started) return cb({ success: false, message: "Game already started" });
 
-    room.players[socket.id] = { id: socket.id, name, score: 0 };
-    socket.join(code);
+    if (isOwner && !room.ownerId) {
+      room.ownerId = socket.id;
+    }
 
-    io.to(code).emit("playerList", {
-      players: Object.values(room.players),
-      owner: room.owner,
-    });
-    cb?.({ success: true, code });
-  });
-
-  // Rejoin after refresh
-  socket.on("rejoinRoom", ({ code, name }, cb) => {
-    code = String(code).trim().toUpperCase();
-    const room = rooms[code];
-    if (!room) return cb?.({ success: false, message: "Room not found" });
-
-    const existing = Object.values(room.players).find((p) => p.name === name);
+    const existing = room.players.find(p => p.id === socket.id);
     if (!existing) {
-      return cb?.({ success: false, message: "Player not in this room" });
+      room.players.push({ id: socket.id, name, score: 0 });
     }
 
-    // Swap socket ID
-    delete room.players[existing.id];
-    room.players[socket.id] = { id: socket.id, name, score: existing.score };
     socket.join(code);
-
-    if (room._ownerTimeout) {
-      clearTimeout(room._ownerTimeout);
-      delete room._ownerTimeout;
-    }
-
-    io.to(code).emit("playerList", {
-      players: Object.values(room.players),
-      owner: room.owner,
-    });
-    cb?.({ success: true });
+    cb({ success: true, owner: room.ownerId, players: room.players });
+    io.to(code).emit("playerList", { players: room.players, owner: room.ownerId });
   });
 
-  // Start game
   socket.on("startGame", (code) => {
-    code = String(code).trim().toUpperCase();
+    if (!rooms[code]) return;
     const room = rooms[code];
-    if (room && room.owner === socket.id) {
-      room.started = true;
-      io.to(code).emit("gameStarted");
-    }
+    if (room.ownerId !== socket.id) return;
+    room.started = true;
+    io.to(code).emit("goToGamePage");
   });
 
-  // Handle disconnect
+  socket.on("kickPlayer", ({ code, targetId }) => {
+    const room = rooms[code];
+    if (!room || room.ownerId !== socket.id) return;
+    room.players = room.players.filter(p => p.id !== targetId);
+    io.to(targetId).emit("kicked");
+    io.to(code).emit("playerList", { players: room.players, owner: room.ownerId });
+  });
+
+  socket.on("createQuestion", ({ code, question, options, correctIndexes, duration, points }) => {
+    const room = rooms[code];
+    if (!room || room.ownerId !== socket.id) return;
+    room.currentQ = { question, options, correctIndexes, duration, points, answers: {} };
+    io.to(code).emit("questionStarted", { question, options, duration });
+    setTimeout(() => endQuestion(code), duration * 1000);
+  });
+
+  socket.on("submitAnswer", ({ code, selections }) => {
+    const room = rooms[code];
+    if (!room?.currentQ) return;
+    room.currentQ.answers[socket.id] = selections;
+  });
+
+  socket.on("endQuestionNow", (code) => {
+    const room = rooms[code];
+    if (room?.ownerId === socket.id) endQuestion(code);
+  });
+
   socket.on("disconnect", () => {
-    for (const code of Object.keys(rooms)) {
+    for (const code in rooms) {
       const room = rooms[code];
-      if (!room) continue;
-
-      if (room.players[socket.id]) {
-        const wasOwner = room.owner === socket.id;
-        delete room.players[socket.id];
-
-        if (wasOwner) {
-          room._ownerTimeout = setTimeout(() => {
-            if (!room.owner || !io.sockets.sockets.get(room.owner)) {
-              io.to(code).emit("roomClosed");
-              delete rooms[code];
-              console.log("Room deleted:", code);
-            }
-          }, 30000); // 30s grace
-        }
-
-        io.to(code).emit("playerList", {
-          players: Object.values(room.players),
-          owner: room.owner,
-        });
-        break;
+      room.players = room.players.filter(p => p.id !== socket.id);
+      if (room.ownerId === socket.id) {
+        io.to(code).emit("roomClosed");
+        delete rooms[code];
+      } else {
+        io.to(code).emit("playerList", { players: room.players, owner: room.ownerId });
       }
     }
   });
 });
 
+function endQuestion(code) {
+  const room = rooms[code];
+  if (!room?.currentQ) return;
+  const q = room.currentQ;
+
+  const results = [];
+  for (const player of room.players) {
+    const selections = q.answers[player.id] || [];
+    const correct = selections.length === q.correctIndexes.length &&
+      selections.every(idx => q.correctIndexes.includes(idx));
+    const awarded = correct ? q.points : 0;
+    player.score += awarded;
+    results.push({ id: player.id, correct, awarded });
+  }
+
+  io.to(code).emit("questionEnded", { results, correctIndexes: q.correctIndexes });
+  io.to(code).emit("leaderboard", room.players);
+  room.currentQ = null;
+}
+
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log("Server running on port", PORT));
+server.listen(PORT, () => console.log("Server on " + PORT));
