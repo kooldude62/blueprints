@@ -18,7 +18,7 @@
       background: rgba(0,0,0,0.6);
       padding: 30px;
       border-radius: 15px;
-      width: 400px;
+      width: 420px;
       text-align: center;
       box-shadow: 0 6px 12px rgba(0,0,0,0.3);
     }
@@ -53,39 +53,72 @@
       font-weight: bold;
       display: none;
     }
+    #lobby {
+      display: none;
+      margin-top: 20px;
+    }
+    #roomCodeDisplay {
+      font-size: 22px;
+      font-weight: bold;
+      margin: 15px 0;
+    }
+    ul {
+      list-style: none;
+      padding: 0;
+      margin: 10px 0;
+      max-height: 150px;
+      overflow-y: auto;
+    }
+    li {
+      margin: 5px 0;
+      padding: 5px 10px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 6px;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>Blooket Lobby</h1>
-    <input id="playerName" type="text" placeholder="Enter your name"><br>
-    <button id="createBtn">Create Room</button>
-    <br>
-    <input id="roomCode" type="text" placeholder="Enter Room Code"><br>
-    <button id="joinBtn">Join Room</button>
-    <p id="error"></p>
+    <div id="joinForm">
+      <input id="playerName" type="text" placeholder="Enter your name"><br>
+      <button id="createBtn">Create Room</button>
+      <br>
+      <input id="roomCode" type="text" placeholder="Enter Room Code"><br>
+      <button id="joinBtn">Join Room</button>
+      <p id="error"></p>
+    </div>
+
+    <div id="lobby">
+      <p>Share this code with friends:</p>
+      <div id="roomCodeDisplay"></div>
+      <h3>Players in Room:</h3>
+      <ul id="playersList"></ul>
+      <button id="startBtn" style="display:none;">Start Game</button>
+    </div>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
   <script>
     const socket = io();
-    const nameInput = document.getElementById("playerName");
-    const roomCodeInput = document.getElementById("roomCode");
     const errorBox = document.getElementById("error");
+    const joinForm = document.getElementById("joinForm");
+    const lobby = document.getElementById("lobby");
+    const playersList = document.getElementById("playersList");
+    const startBtn = document.getElementById("startBtn");
+    let roomCode = null;
+    let playerName = null;
+    let isOwner = false;
 
     // Create Room
     document.getElementById("createBtn").onclick = () => {
-      const name = nameInput.value.trim();
-      if (!name) {
-        showError("Please enter a name");
-        return;
-      }
-      socket.emit("createRoom", name, (res) => {
+      playerName = document.getElementById("playerName").value.trim();
+      if (!playerName) return showError("Enter your name");
+      socket.emit("createRoom", playerName, (res) => {
         if (res.success) {
-          localStorage.setItem("roomCode", res.code);
-          localStorage.setItem("playerName", name);
-          localStorage.setItem("isOwner", "true");
-          window.location.href = "game.html";
+          roomCode = res.code;
+          isOwner = true;
+          showLobby();
         } else {
           showError("Could not create room");
         }
@@ -94,26 +127,56 @@
 
     // Join Room
     document.getElementById("joinBtn").onclick = () => {
-      const name = nameInput.value.trim();
-      const code = roomCodeInput.value.trim().toUpperCase();
-      if (!name || !code) {
-        showError("Enter both name and room code");
-        return;
-      }
-      socket.emit("joinRoom", { code, name }, (res) => {
+      playerName = document.getElementById("playerName").value.trim();
+      const code = document.getElementById("roomCode").value.trim().toUpperCase();
+      if (!playerName || !code) return showError("Enter name + code");
+      socket.emit("joinRoom", { code, name: playerName }, (res) => {
         if (res.success) {
-          localStorage.setItem("roomCode", code);
-          localStorage.setItem("playerName", name);
-          localStorage.setItem("isOwner", "false");
-          window.location.href = "game.html";
+          roomCode = code;
+          isOwner = false;
+          showLobby();
         } else {
           showError(res.message || "Room not found");
         }
       });
     };
 
+    // Update player list
+    socket.on("playerList", (data) => {
+      playersList.innerHTML = "";
+      data.players.forEach(p => {
+        const li = document.createElement("li");
+        li.textContent = p.name + (p.id === socket.id ? " (You)" : "");
+        playersList.appendChild(li);
+      });
+    });
+
+    // Game started → redirect
+    socket.on("gameStarted", () => {
+      saveAndGo();
+    });
+
+    // Start Game button (owner only)
+    startBtn.onclick = () => {
+      socket.emit("startGame", roomCode);
+    };
+
+    function showLobby() {
+      joinForm.style.display = "none";
+      lobby.style.display = "block";
+      document.getElementById("roomCodeDisplay").textContent = roomCode;
+      if (isOwner) startBtn.style.display = "inline-block";
+    }
+
+    function saveAndGo() {
+      localStorage.setItem("roomCode", roomCode);
+      localStorage.setItem("playerName", playerName);
+      localStorage.setItem("isOwner", isOwner ? "true" : "false");
+      window.location.href = "game.html";
+    }
+
     function showError(msg) {
-      errorBox.innerText = msg;
+      errorBox.textContent = msg;
       errorBox.style.display = "block";
     }
   </script>
