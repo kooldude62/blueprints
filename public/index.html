@@ -2,32 +2,30 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Room Join System</title>
+  <title>Room Lobby</title>
   <script src="/socket.io/socket.io.js"></script>
   <style>
-    body { font-family: Arial, sans-serif; background: #111; color: #eee; text-align: center; padding: 40px; }
-    input, button { padding: 10px; margin: 5px; border-radius: 6px; border: none; }
-    button { background: #28a745; color: white; cursor: pointer; }
-    button:hover { background: #218838; }
-    #roomInfo { margin-top: 20px; padding: 15px; background: #222; border-radius: 8px; }
-    .player-box { display: inline-block; margin: 10px; padding: 10px; border-radius: 6px; background: #333; }
-    .kick-btn { background: #dc3545; margin-left: 10px; }
-    .kick-btn:hover { background: #c82333; }
-    .start-btn { display:block; margin: 20px auto; padding:10px 20px; background:#007bff; }
-    .start-btn:hover { background:#0069d9; }
+    body { font-family: Arial, sans-serif; background: #0f1720; color: #e6eef6; text-align: center; padding: 30px; }
+    input, button, select, textarea { padding: 10px; margin: 6px; border-radius: 8px; border: none; }
+    button { background: #16a34a; color: white; cursor: pointer; }
+    button:hover { filter: brightness(.95); }
+    #roomInfo { margin-top: 20px; padding: 15px; background: #071427; border-radius: 10px; display:inline-block; min-width: 350px;}
+    .player-box { display: inline-block; margin: 8px; padding: 10px; border-radius: 8px; background: #071a25; min-width: 120px; }
+    .kick-btn { background: #ef4444; margin-left: 8px; }
+    .start-btn { display:block; margin: 14px auto; padding:10px 18px; background:#0ea5e9; }
   </style>
 </head>
 <body>
-  <h1>Room System</h1>
+  <h1>Quiz Lobby</h1>
 
   <div>
-    <input id="ownerName" placeholder="Enter Your Name" />
+    <input id="ownerName" placeholder="Owner Name" />
     <button onclick="createRoom()">Create Room (Owner)</button>
   </div>
 
-  <div style="margin-top:20px;">
+  <div style="margin-top:14px;">
     <input id="joinCode" placeholder="Enter Join Code" />
-    <input id="playerName" placeholder="Enter Name" />
+    <input id="playerName" placeholder="Player Name" />
     <button onclick="joinRoom()">Join Room</button>
   </div>
 
@@ -39,18 +37,24 @@
     let isOwner = false;
     let myId = null;
     let ownerId = null;
+    let myName = null;
 
     async function createRoom() {
       const playerName = document.getElementById("ownerName").value.trim();
       if (!playerName) return alert("Enter your name!");
-
       const res = await fetch("/create", { method: "POST" });
       const data = await res.json();
       currentRoom = data.joinCode;
       isOwner = true;
+      myName = playerName;
+
+      // store for game page redirect and rejoin
+      localStorage.setItem("roomCode", currentRoom);
+      localStorage.setItem("playerName", myName);
+      localStorage.setItem("isOwner", "true");
 
       document.getElementById("roomInfo").innerHTML =
-        `<h3>Room Created</h3><p>Join Code: <b>${data.joinCode}</b></p>`;
+        `<h3>Room Created</h3><p>Join Code: <b>${currentRoom}</b></p>`;
 
       socket.emit("joinRoom", { code: currentRoom, playerName, isOwner: true });
     }
@@ -59,20 +63,24 @@
       const code = document.getElementById("joinCode").value.trim().toUpperCase();
       const playerName = document.getElementById("playerName").value.trim();
       if (!code || !playerName) return alert("Enter join code and name!");
-
       const res = await fetch("/join", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code })
       });
-
       if (res.status !== 200) {
         alert("Room not found!");
         return;
       }
-
       currentRoom = code;
-      socket.emit("joinRoom", { code, playerName, isOwner: false });
+      myName = playerName;
+      isOwner = false;
+
+      localStorage.setItem("roomCode", currentRoom);
+      localStorage.setItem("playerName", myName);
+      localStorage.setItem("isOwner", "false");
+
+      socket.emit("joinRoom", { code: currentRoom, playerName, isOwner: false });
     }
 
     socket.on("connect", () => {
@@ -89,15 +97,14 @@
         if (isOwner && player.id !== ownerId) {
           playerBox += ` <button class="kick-btn" onclick="kickPlayer('${player.id}')">Kick</button>`;
         }
-        if (player.id === ownerId) {
-          playerBox += " (Owner)";
-        }
-        playerBox += "</div>";
+        if (player.id === ownerId) playerBox += " (Owner)";
+        playerBox += ` <div style="font-size:.85em;color:#9fb6c9">Points: ${player.score ?? 0}</div>`;
+        playerBox += `</div>`;
         roomDiv.innerHTML += playerBox;
       });
 
       if (isOwner) {
-        roomDiv.innerHTML += `<button class="start-btn" onclick="startGame()">Start Game</button>`;
+        roomDiv.innerHTML += `<button class="start-btn" onclick="startGame()">Start Game (Go to Game Page)</button>`;
       }
     });
 
@@ -105,11 +112,14 @@
 
     socket.on("kicked", () => {
       alert("You were kicked from the room!");
+      localStorage.removeItem("roomCode");
+      localStorage.removeItem("playerName");
+      localStorage.removeItem("isOwner");
       location.reload();
     });
 
-    socket.on("gameStarted", (players) => {
-      localStorage.setItem("players", JSON.stringify(players));
+    socket.on("goToGamePage", () => {
+      // owner pressed start — redirect everyone to game page
       window.location.href = "/game.html";
     });
 
@@ -120,6 +130,19 @@
     function startGame() {
       socket.emit("startGame", currentRoom);
     }
+
+    // Auto-rejoin if page refresh or reopened (if data in localStorage)
+    (function tryAutoRejoin(){
+      const savedCode = localStorage.getItem("roomCode");
+      const savedName = localStorage.getItem("playerName");
+      const savedIsOwner = localStorage.getItem("isOwner") === "true";
+      if (savedCode && savedName) {
+        currentRoom = savedCode;
+        myName = savedName;
+        isOwner = savedIsOwner;
+        socket.emit("joinRoom", { code: currentRoom, playerName: myName, isOwner });
+      }
+    })();
   </script>
 </body>
 </html>
