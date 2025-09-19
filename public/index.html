@@ -46,7 +46,6 @@
   </div>
 
   <script>
-    // --- Config / helpers ---
     const socket = io();
     const createBtn = document.getElementById("createBtn");
     const joinBtn = document.getElementById("joinBtn");
@@ -62,40 +61,36 @@
     const ownerInfo = document.getElementById("ownerInfo");
 
     let currentRoom = null;
-    let amOwnerLocal = false; // local claim (from create button or localStorage)
     let mySocketId = null;
     let serverOwnerId = null;
 
-    // small UI helpers
     function showError(msg) {
       errorBox.innerText = msg;
       errorBox.style.display = "block";
       setTimeout(()=> errorBox.style.display = "none", 4500);
     }
-    function setLobbyVisible(code, amOwner) {
+
+    function setLobbyVisible(code) {
       joinUI.style.display = "none";
       lobbyUI.style.display = "block";
       roomCodeDisplay.innerText = code;
-      amOwnerLocal = amOwner;
-      renderStartButton(); // show/hide based on server owner (updated by playerList)
       createLeaveButton();
     }
 
-    // Ensure socket connected (returns a Promise)
     function ensureSocketConnected() {
       if (socket.connected) return Promise.resolve();
       return new Promise(resolve => socket.once('connect', resolve));
     }
 
-    // --- REST helper with fallback to socket flow ---
+    // REST-first create, fallback to socket create
     async function createRoomFlow(name) {
       try {
-        const res = await fetch('/api/create', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+        const res = await fetch('/api/create', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
         if (!res.ok) throw new Error('REST create failed');
         const j = await res.json();
-        return { ok: true, code: j.code };
-      } catch (e) {
-        // fallback to socket-only create (older server)
+        return { ok:true, code: j.code };
+      } catch(e) {
+        // fallback socket create
         return new Promise(resolve => {
           socket.emit('createRoomSocket', { name }, (resp) => {
             if (resp?.success) resolve({ ok:true, code: resp.code });
@@ -108,51 +103,41 @@
     async function joinRoomFlow(code, name) {
       code = String(code || '').trim().toUpperCase();
       try {
-        const res = await fetch('/api/join', { method:'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ code, name }) });
+        const res = await fetch('/api/join', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code, name }) });
         if (!res.ok) {
           const j = await res.json().catch(()=>({ error: 'Join failed' }));
           return { ok:false, message: j.error || j.message || 'Join failed' };
         }
         return { ok:true, code };
-      } catch (e) {
-        // fallback to socket join validation - still try socket join directly
-        return { ok:true, code }; // we let socket emit handle the real join checks
+      } catch(e) {
+        // fallback: allow socket to try join (server will validate)
+        return { ok:true, code };
       }
     }
 
-    // --- Socket-assisted join (emits joinRoom) ---
     function socketJoin(code, name, isOwnerClaim=false) {
       return new Promise(resolve => {
         ensureSocketConnected().then(() => {
           socket.emit('joinRoom', { code, name, isOwner: !!isOwnerClaim }, (resp) => {
-            resolve(resp || { success:false, message: 'No response' });
+            resolve(resp || { success:false, message:'No response' });
           });
         });
       });
     }
 
-    // --- UI actions ---
     createBtn.onclick = async () => {
       const name = playerNameInput.value.trim();
       if (!name) return showError('Enter your name');
-      // create via REST (preferred)
       const createResp = await createRoomFlow(name);
-      if (!createResp.ok) {
-        showError(createResp.message || 'Could not create room');
-        return;
-      }
+      if (!createResp.ok) return showError(createResp.message || 'Could not create room');
       const code = createResp.code;
-      // now socket-join and claim owner (server will assign owner to this socket)
       const joinResp = await socketJoin(code, name, true);
-      if (!joinResp.success) {
-        showError(joinResp.message || 'Socket join failed after create');
-        return;
-      }
+      if (!joinResp.success) return showError(joinResp.message || 'Socket join failed after create');
       currentRoom = code;
       localStorage.setItem('roomCode', currentRoom);
       localStorage.setItem('playerName', name);
       localStorage.setItem('isOwner', 'true');
-      setLobbyVisible(currentRoom, true);
+      setLobbyVisible(currentRoom);
     };
 
     joinBtn.onclick = async () => {
@@ -162,53 +147,37 @@
       const code = codeRaw.toUpperCase().trim();
 
       const pre = await joinRoomFlow(code, name);
-      if (!pre.ok) {
-        showError(pre.message || 'Cannot join room');
-        return;
-      }
+      if (!pre.ok) return showError(pre.message || 'Cannot join room');
 
-      // now socket join
       const joinResp = await socketJoin(code, name, false);
-      if (!joinResp.success) {
-        showError(joinResp.message || 'Socket join failed');
-        return;
-      }
+      if (!joinResp.success) return showError(joinResp.message || 'Socket join failed');
 
       currentRoom = code;
       localStorage.setItem('roomCode', currentRoom);
       localStorage.setItem('playerName', name);
       localStorage.setItem('isOwner', 'false');
-      setLobbyVisible(currentRoom, false);
+      setLobbyVisible(currentRoom);
     };
 
-    // render list of players and owner-specific UI
     function renderPlayers(players, ownerId) {
       serverOwnerId = ownerId;
       playersList.innerHTML = '';
       players.forEach(p => {
         const div = document.createElement('div');
         div.className = 'playerBox';
-        const left = document.createElement('div');
-        left.innerText = p.name;
-        const right = document.createElement('div');
-        right.innerHTML = `${p.score ?? 0} ${p.id === ownerId ? "<span class='ownerBadge'>(Owner)</span>": ""}`;
-        div.appendChild(left);
-        div.appendChild(right);
+        const left = document.createElement('div'); left.innerText = p.name;
+        const right = document.createElement('div'); right.innerHTML = `${p.score ?? 0} ${p.id === ownerId ? "<span class='ownerBadge'>(Owner)</span>": ""}`;
+        div.appendChild(left); div.appendChild(right);
 
-        // If current socket is server owner, show Kick button for others
+        // if I'm server owner, show Kick button for others
         if (serverOwnerId === mySocketId && p.id !== mySocketId) {
           const kickBtn = document.createElement('button');
           kickBtn.innerText = 'Kick';
-          kickBtn.onclick = () => {
-            socket.emit('kickPlayer', { code: currentRoom, targetId: p.id });
-          };
+          kickBtn.onclick = () => socket.emit('kickPlayer', { code: currentRoom, targetId: p.id });
           div.appendChild(kickBtn);
         }
-
         playersList.appendChild(div);
       });
-
-      // show owner info label
       ownerInfo.innerText = serverOwnerId === mySocketId ? 'You are owner' : '';
       renderStartButton();
     }
@@ -216,7 +185,6 @@
     function renderStartButton() {
       startContainer.innerHTML = '';
       if (!currentRoom) return;
-      // Only show Start if server owner is our socket id
       if (serverOwnerId === mySocketId) {
         const startBtn = document.createElement('button');
         startBtn.innerText = 'Start Game';
@@ -231,7 +199,6 @@
       const leaveBtn = document.createElement('button');
       leaveBtn.innerText = 'Leave';
       leaveBtn.onclick = () => {
-        // simple leave: reload and clear saved state
         localStorage.removeItem('roomCode');
         localStorage.removeItem('playerName');
         localStorage.removeItem('isOwner');
@@ -240,10 +207,8 @@
       leaveContainer.appendChild(leaveBtn);
     }
 
-    // --- socket events ---
     socket.on('connect', () => {
       mySocketId = socket.id;
-      // if we have saved room info, try to rejoin (claiming owner if was owner)
       tryAutoRejoin();
     });
 
@@ -251,10 +216,7 @@
       renderPlayers(players || [], owner);
     });
 
-    socket.on('goToGamePage', () => {
-      // server asked to start: redirect all players
-      window.location.href = '/game.html';
-    });
+    socket.on('goToGamePage', () => window.location.href = '/game.html');
 
     socket.on('kicked', () => {
       alert('You were kicked by the owner.');
@@ -272,39 +234,27 @@
       location.reload();
     });
 
-    socket.on('errorMsg', (m) => {
-      showError(m || 'Error from server');
-    });
+    socket.on('errorMsg', (m) => showError(m || 'Server error'));
 
-    // --- Auto rejoin on load if saved ---
     async function tryAutoRejoin() {
       const savedCode = localStorage.getItem('roomCode');
       const savedName = localStorage.getItem('playerName');
       const savedIsOwner = localStorage.getItem('isOwner') === 'true';
       if (!savedCode || !savedName) return;
-
-      // first try REST join validation (non-blocking - server might not have /api/join)
-      try {
-        await fetch('/api/join', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code: savedCode, name: savedName }) });
-      } catch(e) {
-        // ignore - fallback to socket join
-      }
-
-      // then try socket join (reclaim owner if saved)
-      const resp = await socketJoin(savedCode, savedName, savedIsOwner);
+      // attempt REST validation (non-blocking)
+      try { await fetch('/api/join', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code: savedCode, name: savedName }) }); } catch(e){}
+      // socket join (reclaim owner if saved)
+      const resp = await new Promise(resolve => socket.emit('joinRoom', { code: savedCode, name: savedName, isOwner: savedIsOwner }, (r) => resolve(r || { success:false })));
       if (resp?.success) {
         currentRoom = savedCode;
-        setLobbyVisible(currentRoom, savedIsOwner);
+        setLobbyVisible(currentRoom);
       } else {
-        // invalid saved state -> clear
+        // clear invalid saved state
         localStorage.removeItem('roomCode');
         localStorage.removeItem('playerName');
         localStorage.removeItem('isOwner');
-        console.warn('Auto-rejoin failed:', resp);
       }
     }
-
-    // optional debug: press Ctrl+Shift+I to open devtools and check network logs
   </script>
 </body>
 </html>
