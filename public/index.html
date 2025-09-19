@@ -2,113 +2,120 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Room Lobby</title>
-  <script src="/socket.io/socket.io.js"></script>
+  <title>Blooket-Style Lobby</title>
   <style>
-    body { font-family: Arial; text-align: center; background: #f5f5f5; }
-    #lobby, #game { display: none; }
-    .playerBox { border: 1px solid #333; padding: 10px; margin: 5px; display: inline-block; background: #fff; }
-    .ownerTag { color: red; font-weight: bold; }
+    body {
+      font-family: Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      color: white;
+    }
+    .container {
+      background: rgba(0,0,0,0.6);
+      padding: 30px;
+      border-radius: 15px;
+      width: 400px;
+      text-align: center;
+      box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+    }
+    h1 {
+      margin-bottom: 20px;
+    }
+    input {
+      width: 80%;
+      padding: 10px;
+      margin: 10px 0;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+    }
+    button {
+      padding: 10px 20px;
+      margin: 10px;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+      background: #ffca28;
+      color: #333;
+      transition: background 0.2s;
+    }
+    button:hover {
+      background: #ffc107;
+    }
+    #error {
+      color: #ff7777;
+      margin-top: 10px;
+      font-weight: bold;
+      display: none;
+    }
   </style>
 </head>
 <body>
-  <h1>Game Lobby</h1>
-
-  <div id="menu">
-    <input id="playerName" placeholder="Your name"><br><br>
+  <div class="container">
+    <h1>Blooket Lobby</h1>
+    <input id="playerName" type="text" placeholder="Enter your name"><br>
     <button id="createBtn">Create Room</button>
-    <br><br>
-    <input id="roomCode" placeholder="Room code">
+    <br>
+    <input id="roomCode" type="text" placeholder="Enter Room Code"><br>
     <button id="joinBtn">Join Room</button>
+    <p id="error"></p>
   </div>
 
-  <div id="lobby">
-    <h2>Room Code: <span id="roomDisplay"></span></h2>
-    <div id="players"></div>
-    <button id="startBtn" style="display:none;">Start Game</button>
-  </div>
-
+  <script src="/socket.io/socket.io.js"></script>
   <script>
     const socket = io();
-    let roomCode = null;
-    let isOwner = false;
+    const nameInput = document.getElementById("playerName");
+    const roomCodeInput = document.getElementById("roomCode");
+    const errorBox = document.getElementById("error");
 
+    // Create Room
     document.getElementById("createBtn").onclick = () => {
-      const name = document.getElementById("playerName").value.trim();
-      if (!name) return alert("Enter a name");
-
+      const name = nameInput.value.trim();
+      if (!name) {
+        showError("Please enter a name");
+        return;
+      }
       socket.emit("createRoom", name, (res) => {
         if (res.success) {
-          roomCode = res.code;
-          isOwner = true;
-          enterLobby();
+          localStorage.setItem("roomCode", res.code);
+          localStorage.setItem("playerName", name);
+          localStorage.setItem("isOwner", "true");
+          window.location.href = "game.html";
+        } else {
+          showError("Could not create room");
         }
       });
     };
 
+    // Join Room
     document.getElementById("joinBtn").onclick = () => {
-      const name = document.getElementById("playerName").value.trim();
-      const code = document.getElementById("roomCode").value.trim().toUpperCase();
-      if (!name || !code) return alert("Enter name and code");
-
+      const name = nameInput.value.trim();
+      const code = roomCodeInput.value.trim().toUpperCase();
+      if (!name || !code) {
+        showError("Enter both name and room code");
+        return;
+      }
       socket.emit("joinRoom", { code, name }, (res) => {
         if (res.success) {
-          roomCode = res.code;
-          isOwner = false;
-          enterLobby();
+          localStorage.setItem("roomCode", code);
+          localStorage.setItem("playerName", name);
+          localStorage.setItem("isOwner", "false");
+          window.location.href = "game.html";
         } else {
-          alert(res.message);
+          showError(res.message || "Room not found");
         }
       });
     };
 
-    function enterLobby() {
-      document.getElementById("menu").style.display = "none";
-      document.getElementById("lobby").style.display = "block";
-      document.getElementById("roomDisplay").innerText = roomCode;
-      if (isOwner) {
-        document.getElementById("startBtn").style.display = "block";
-      }
+    function showError(msg) {
+      errorBox.innerText = msg;
+      errorBox.style.display = "block";
     }
-
-    socket.on("updatePlayers", (players) => {
-      const container = document.getElementById("players");
-      container.innerHTML = "";
-      for (const id in players) {
-        const box = document.createElement("div");
-        box.className = "playerBox";
-        box.innerHTML = players[id].name + (id === socket.id ? " (You)" : "");
-        if (isOwner && id !== socket.id) {
-          const kickBtn = document.createElement("button");
-          kickBtn.innerText = "Kick";
-          kickBtn.onclick = () => socket.emit("kickPlayer", { code: roomCode, targetId: id });
-          box.appendChild(document.createElement("br"));
-          box.appendChild(kickBtn);
-        }
-        if (id === Object.keys(players)[0]) {
-          box.innerHTML += " <span class='ownerTag'>(Owner)</span>";
-        }
-        container.appendChild(box);
-      }
-    });
-
-    document.getElementById("startBtn").onclick = () => {
-      socket.emit("startGame", roomCode);
-    };
-
-    socket.on("gameStarted", (players) => {
-      window.location.href = "/game.html?code=" + roomCode;
-    });
-
-    socket.on("kicked", () => {
-      alert("You were kicked");
-      window.location.reload();
-    });
-
-    socket.on("roomClosed", () => {
-      alert("Room closed by owner");
-      window.location.reload();
-    });
   </script>
 </body>
 </html>
