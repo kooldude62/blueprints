@@ -10,13 +10,17 @@
     button { background: #28a745; color: white; cursor: pointer; }
     button:hover { background: #218838; }
     #roomInfo { margin-top: 20px; padding: 15px; background: #222; border-radius: 8px; }
+    .player-box { display: inline-block; margin: 10px; padding: 10px; border-radius: 6px; background: #333; }
+    .kick-btn { background: #dc3545; margin-left: 10px; }
+    .kick-btn:hover { background: #c82333; }
   </style>
 </head>
 <body>
   <h1>Room System</h1>
 
   <div>
-    <button onclick="createRoom()">Create Room</button>
+    <input id="ownerName" placeholder="Enter Your Name" />
+    <button onclick="createRoom()">Create Room (Owner)</button>
   </div>
 
   <div style="margin-top:20px;">
@@ -30,28 +34,34 @@
   <script>
     const socket = io();
     let currentRoom = null;
+    let isOwner = false;
+    let myId = null;
+    let ownerId = null;
 
     async function createRoom() {
+      const playerName = document.getElementById("ownerName").value.trim();
+      if (!playerName) return alert("Enter your name!");
+
       const res = await fetch("/create", { method: "POST" });
       const data = await res.json();
       currentRoom = data.joinCode;
+      isOwner = true;
+
       document.getElementById("roomInfo").innerHTML =
         `<h3>Room Created</h3><p>Join Code: <b>${data.joinCode}</b></p>`;
+
+      socket.emit("joinRoom", { code: currentRoom, playerName, isOwner: true });
     }
 
     async function joinRoom() {
       const code = document.getElementById("joinCode").value.trim().toUpperCase();
       const playerName = document.getElementById("playerName").value.trim();
-      if (!code || !playerName) {
-        alert("Enter join code and name!");
-        return;
-      }
+      if (!code || !playerName) return alert("Enter join code and name!");
 
-      // Call backend to validate room
       const res = await fetch("/join", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, playerName })
+        body: JSON.stringify({ code })
       });
 
       if (res.status !== 200) {
@@ -60,15 +70,41 @@
       }
 
       currentRoom = code;
-      socket.emit("joinRoom", { code, playerName });
+      socket.emit("joinRoom", { code, playerName, isOwner: false });
     }
 
-    socket.on("playerList", (players) => {
-      document.getElementById("roomInfo").innerHTML =
-        `<h3>Room: ${currentRoom}</h3><p>Players: ${players.join(", ")}</p>`;
+    socket.on("connect", () => {
+      myId = socket.id;
+    });
+
+    socket.on("playerList", (data) => {
+      ownerId = data.owner;
+      const roomDiv = document.getElementById("roomInfo");
+      roomDiv.innerHTML = `<h3>Room: ${currentRoom}</h3>`;
+
+      data.players.forEach(player => {
+        let playerBox = `<div class="player-box">${player.name}`;
+        if (isOwner && player.id !== ownerId) {
+          playerBox += ` <button class="kick-btn" onclick="kickPlayer('${player.id}')">Kick</button>`;
+        }
+        if (player.id === ownerId) {
+          playerBox += " (Owner)";
+        }
+        playerBox += "</div>";
+        roomDiv.innerHTML += playerBox;
+      });
     });
 
     socket.on("errorMsg", (msg) => alert(msg));
+
+    socket.on("kicked", () => {
+      alert("You were kicked from the room!");
+      location.reload();
+    });
+
+    function kickPlayer(targetId) {
+      socket.emit("kickPlayer", { code: currentRoom, targetId });
+    }
   </script>
 </body>
 </html>
