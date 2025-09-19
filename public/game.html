@@ -2,27 +2,328 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Game Page</title>
+  <title>Game</title>
   <script src="/socket.io/socket.io.js"></script>
   <style>
-    body { font-family: Arial, sans-serif; background: #000; color: #fff; text-align: center; padding: 40px; }
-    .player-card { margin: 10px auto; padding: 15px; width: 200px; background: #222; border-radius: 8px; }
+    body { font-family: Arial, sans-serif; background: #05070a; color: #eef6ff; padding: 24px; display: flex; gap: 20px; }
+    #main { flex: 1; }
+    #side { width: 320px; background: #071426; padding: 12px; border-radius: 10px; }
+    .card { background: #0b2130; padding: 12px; border-radius: 8px; margin-bottom: 10px; }
+    .option-btn { display:block; width:100%; text-align:left; padding:10px; margin:8px 0; border-radius:8px; background:#092b36; cursor:pointer; border:none; }
+    .option-btn.selected { outline: 3px solid #86efac; }
+    #timer { font-size: 20px; font-weight: 700; margin-top:8px; }
+    .leader { margin:6px 0; padding:8px; background:#061a24; border-radius:6px; display:flex; justify-content:space-between; align-items:center; }
+    .top-highlight { animation: pop .9s ease; border: 2px solid gold; }
+    @keyframes pop { 0%{ transform: scale(.9) } 50%{ transform: scale(1.07) } 100%{ transform: scale(1) } }
+    #point-shower { position:fixed; right: 20px; bottom: 20px; background: rgba(255,255,255,0.06); padding:8px 12px; border-radius:12px; display:none; }
+    .small { font-size: 12px; color:#9fb6c9; }
+    .owner-controls { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+    input[type="number"] { width:80px; }
+    .modal { background: rgba(0,0,0,0.5); position:fixed; inset:0; display:flex; justify-content:center; align-items:center; }
+    .modal .box { background:#04202a; padding:18px; border-radius:10px; width:720px; color:#e6f5fa; }
+    .option-row { display:flex; gap:8px; align-items:center; margin-bottom:6px;}
   </style>
 </head>
 <body>
-  <h1>Game Started!</h1>
-  <div id="players"></div>
+  <div id="main">
+    <h1>Live Quiz</h1>
+    <div id="questionArea" class="card">
+      <div id="qText"><em>No active question</em></div>
+      <div id="timer"></div>
+      <div id="options"></div>
+      <div id="answerStatus" class="small"></div>
+    </div>
+
+    <div id="ownerArea" class="card" style="display:none;">
+      <h3>Owner Controls</h3>
+      <div class="owner-controls">
+        <button onclick="openCreateModal()">Create Question</button>
+        <button onclick="endQuestionNow()">End Question Now</button>
+      </div>
+      <div class="small" style="margin-top:8px">Create questions with multiple correct answers if you want.</div>
+    </div>
+  </div>
+
+  <div id="side">
+    <div class="card">
+      <h3>Leaderboard</h3>
+      <div id="leaderboard"></div>
+    </div>
+
+    <div class="card">
+      <h3>Players</h3>
+      <div id="playersList"></div>
+    </div>
+  </div>
+
+  <div id="point-shower"></div>
+
+  <!-- Create question modal -->
+  <div id="createModal" class="modal" style="display:none;">
+    <div class="box">
+      <h2>Create Question</h2>
+      <div>
+        <label>Question</label><br>
+        <textarea id="cq_text" rows="2" style="width:100%;"></textarea>
+      </div>
+
+      <div id="optionsContainer" style="margin-top:8px;">
+        <label>Options</label>
+        <div id="optRows"></div>
+        <button onclick="addOptionRow()">Add option</button>
+      </div>
+
+      <div style="margin-top:8px;">
+        <label>Duration (seconds)</label>
+        <input id="cq_duration" type="number" value="10" min="1" />
+        <label style="margin-left:12px">Points if correct</label>
+        <input id="cq_points" type="number" value="1" min="0" />
+      </div>
+
+      <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+        <button onclick="closeCreateModal()">Cancel</button>
+        <button onclick="createQuestion()">Create & Start</button>
+      </div>
+    </div>
+  </div>
 
   <script>
-    const players = JSON.parse(localStorage.getItem("players")) || [];
-    const playersDiv = document.getElementById("players");
+    const socket = io();
+    const roomCode = localStorage.getItem("roomCode");
+    const playerName = localStorage.getItem("playerName");
+    const isOwner = localStorage.getItem("isOwner") === "true";
 
-    players.forEach(player => {
-      const card = document.createElement("div");
-      card.className = "player-card";
-      card.innerText = player.name;
-      playersDiv.appendChild(card);
+    if (!roomCode || !playerName) {
+      alert("Missing room info. Go back to lobby.");
+      window.location.href = "/";
+    }
+
+    let myId = null;
+    let answered = false;
+    let selectedIndexes = [];
+
+    // initial join
+    socket.on("connect", () => {
+      myId = socket.id;
+      // join the same room again in game page
+      socket.emit("joinRoom", { code: roomCode, playerName, isOwner });
+      if (isOwner) document.getElementById("ownerArea").style.display = "block";
     });
+
+    // show players list and small points
+    socket.on("playerList", (data) => {
+      const playersList = document.getElementById("playersList");
+      playersList.innerHTML = '';
+      data.players.forEach(p => {
+        const el = document.createElement("div");
+        el.className = 'small';
+        el.innerText = `${p.name} — ${p.score ?? 0} pts`;
+        playersList.appendChild(el);
+      });
+      renderLeaderboard(data.players);
+    });
+
+    // leaderboard update
+    socket.on("leaderboard", (leader) => {
+      renderLeaderboard(leader);
+      // point shower for top scorer
+      if (leader && leader.length>0) {
+        const top = leader[0];
+        showPointShower(`${top.name} is leading — ${top.score} pts`);
+      }
+    });
+
+    function renderLeaderboard(players) {
+      const sorted = [...players].sort((a,b)=>b.score - a.score);
+      const node = document.getElementById("leaderboard");
+      node.innerHTML = '';
+      sorted.forEach((p, i) => {
+        const div = document.createElement("div");
+        div.className = 'leader' + (i===0 ? ' top-highlight' : '');
+        div.innerHTML = `<div>${p.name}</div><div>${p.score ?? 0}</div>`;
+        node.appendChild(div);
+      });
+    }
+
+    function showPointShower(text) {
+      const el = document.getElementById("point-shower");
+      el.innerText = text;
+      el.style.display = "block";
+      setTimeout(()=> el.style.display = "none", 2500);
+    }
+
+    // question started
+    socket.on("questionStarted", ({ question, options, duration }) => {
+      answered = false;
+      selectedIndexes = [];
+      document.getElementById("qText").innerHTML = `<strong>${escapeHtml(question)}</strong>`;
+      const opts = document.getElementById("options");
+      opts.innerHTML = '';
+      options.forEach((o, idx) => {
+        const btn = document.createElement("button");
+        btn.className = 'option-btn';
+        btn.innerText = o;
+        btn.onclick = () => selectOption(btn, idx);
+        opts.appendChild(btn);
+      });
+      document.getElementById("answerStatus").innerText = '';
+      startCountdown(duration);
+    });
+
+    // question ended: show results and updated leaderboard will be received separately
+    socket.on("questionEnded", ({ results, correctIndexes }) => {
+      // highlight correct answers
+      const optionButtons = document.querySelectorAll('.option-btn');
+      optionButtons.forEach((btn, i) => {
+        if (correctIndexes.includes(i)) {
+          btn.style.border = '3px solid #60a5fa'; // mark correct
+        } else {
+          btn.style.opacity = '0.6';
+        }
+      });
+
+      // show who got it right or wrong (brief)
+      const meResult = results.find(r => r.id === myId);
+      if (meResult) {
+        document.getElementById("answerStatus").innerText =
+          meResult.correct ? `Correct! +${meResult.awarded} pts` : `Wrong. +0 pts`;
+      } else {
+        document.getElementById("answerStatus").innerText = 'Question ended.';
+      }
+    });
+
+    socket.on("errorMsg", msg => alert(msg));
+
+    socket.on("kicked", () => {
+      alert("You were kicked.");
+      localStorage.removeItem("roomCode");
+      localStorage.removeItem("playerName");
+      localStorage.removeItem("isOwner");
+      window.location.href = "/";
+    });
+
+    // select option (for multiple-correct support, toggle)
+    function selectOption(btn, idx) {
+      if (answered) return;
+      const already = selectedIndexes.includes(idx);
+      if (already) {
+        selectedIndexes = selectedIndexes.filter(i => i !== idx);
+        btn.classList.remove('selected');
+      } else {
+        // allow multiple selection - owner might set multi-correct
+        selectedIndexes.push(idx);
+        btn.classList.add('selected');
+      }
+      // auto-submit on selection? Keep manual: show Submit button -> but simpler: submit on first selection
+      // We'll submit automatically once user has selected (but allow toggle until they submit)
+      // Add a small "Submit" step: here we show a 'Submit' button only once selection exists
+      renderSubmit();
+    }
+
+    function renderSubmit() {
+      let submitBtn = document.getElementById("submitBtn");
+      if (!submitBtn) {
+        submitBtn = document.createElement('button');
+        submitBtn.id = 'submitBtn';
+        submitBtn.innerText = 'Submit Answer';
+        submitBtn.style.marginTop = '8px';
+        submitBtn.onclick = submitAnswer;
+        document.getElementById('questionArea').appendChild(submitBtn);
+      }
+      submitBtn.disabled = selectedIndexes.length === 0 || answered;
+    }
+
+    function submitAnswer() {
+      if (answered || selectedIndexes.length === 0) return;
+      socket.emit("submitAnswer", { code: roomCode, selections: selectedIndexes });
+      answered = true;
+      document.getElementById("answerStatus").innerText = 'Answer submitted. Waiting...';
+      const submitBtn = document.getElementById("submitBtn");
+      if (submitBtn) submitBtn.disabled = true;
+    }
+
+    // owner modal management
+    function openCreateModal() {
+      document.getElementById('createModal').style.display = 'flex';
+      if (!document.getElementById('optRows').childElementCount) {
+        // add default 4 options
+        addOptionRow('Option 1');
+        addOptionRow('Option 2');
+        addOptionRow('Option 3');
+        addOptionRow('Option 4');
+      }
+    }
+    function closeCreateModal() {
+      document.getElementById('createModal').style.display = 'none';
+      document.getElementById('cq_text').value = '';
+      document.getElementById('optRows').innerHTML = '';
+    }
+    function addOptionRow(defaultText='') {
+      const container = document.getElementById('optRows');
+      const row = document.createElement('div');
+      row.className = 'option-row';
+      row.innerHTML = `
+        <input type="checkbox" class="opt-correct"/>
+        <input class="opt-text" placeholder="Answer text" style="flex:1" value="${defaultText}" />
+        <button onclick="this.parentNode.remove()">Remove</button>
+      `;
+      container.appendChild(row);
+    }
+
+    function createQuestion() {
+      const q = document.getElementById('cq_text').value.trim();
+      if (!q) return alert('Add question text');
+      const optRows = Array.from(document.querySelectorAll('#optRows .option-row'));
+      if (!optRows.length) return alert('Add at least one option');
+      const options = optRows.map(r => r.querySelector('.opt-text').value.trim());
+      if (options.some(o => !o)) return alert('Fill all option text');
+      const correctIndexes = optRows
+        .map((r,i)=> r.querySelector('.opt-correct').checked ? i : -1)
+        .filter(i => i !== -1);
+      if (!correctIndexes.length) return alert('Select at least one correct answer');
+
+      const duration = Number(document.getElementById('cq_duration').value) || 10;
+      const points = Number(document.getElementById('cq_points').value) || 1;
+
+      // emit to server to create and start question
+      socket.emit('createQuestion', {
+        code: roomCode,
+        question: q,
+        options,
+        correctIndexes,
+        duration,
+        points
+      });
+
+      closeCreateModal();
+    }
+
+    function endQuestionNow() {
+      socket.emit('endQuestionNow', roomCode);
+    }
+
+    // countdown logic
+    let countdownInterval = null;
+    function startCountdown(duration) {
+      const timerEl = document.getElementById('timer');
+      let left = duration;
+      timerEl.innerText = `Time: ${left}s`;
+      if (countdownInterval) clearInterval(countdownInterval);
+      countdownInterval = setInterval(()=>{
+        left--;
+        if (left <= 0) {
+          clearInterval(countdownInterval);
+          timerEl.innerText = 'Time: 0s';
+        } else {
+          timerEl.innerText = `Time: ${left}s`;
+        }
+      }, 1000);
+    }
+
+    // small utility
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
   </script>
 </body>
 </html>
