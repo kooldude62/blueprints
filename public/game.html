@@ -102,30 +102,24 @@
     let answered = false;
     let selectedIndexes = [];
 
+    // Wait for connection then join (handles reconnect after start)
     socket.on("connect", () => {
       myId = socket.id;
-      // join the room and pass isOwner flag so server can reassign owner if needed
       socket.emit("joinRoom", { code: roomCode, name: playerName, isOwner: savedIsOwner }, (res) => {
         if (!res?.success) {
           alert(res?.message || "Failed to join room. Returning to lobby.");
           window.location.href = "/";
           return;
         }
-        // immediate UI update from callback (prevents owner UI race)
+        // show owner area immediately if server says so
         if (res.owner === myId) document.getElementById("ownerArea").style.display = "block";
         else document.getElementById("ownerArea").style.display = "none";
 
-        // render player list immediately
-        if (res.players) {
-          renderPlayersList(res.players, res.owner);
-        }
+        if (res.players) renderPlayersList(res.players, res.owner);
       });
     });
 
-    // update players + show owner controls only for the server-side owner
-    socket.on("playerList", ({ players, owner }) => {
-      renderPlayersList(players || [], owner);
-    });
+    socket.on("playerList", ({ players, owner }) => renderPlayersList(players || [], owner));
 
     function renderPlayersList(players, owner) {
       const playersList = document.getElementById("playersList");
@@ -138,21 +132,16 @@
       });
 
       // owner UI
-      if (owner === myId) {
-        document.getElementById("ownerArea").style.display = "block";
-      } else {
-        document.getElementById("ownerArea").style.display = "none";
-      }
+      if (owner === myId) document.getElementById("ownerArea").style.display = "block";
+      else document.getElementById("ownerArea").style.display = "none";
 
-      // update leaderboard too
       renderLeaderboard(players);
     }
 
     socket.on("leaderboard", (leader) => {
       renderLeaderboard(leader || []);
-      if (leader && leader.length>0) {
-        const top = leader[0];
-        showPointShower(`${top.name} is leading — ${top.score} pts`);
+      if (leader && leader.length) {
+        showPointShower(`${leader[0].name} is leading — ${leader[0].score} pts`);
       }
     });
 
@@ -175,13 +164,11 @@
       setTimeout(()=> el.style.display = "none", 2500);
     }
 
-    // question started
+    // question lifecycle
     socket.on("questionStarted", ({ question, options, duration }) => {
-      answered = false;
-      selectedIndexes = [];
+      answered = false; selectedIndexes = [];
       document.getElementById("qText").innerHTML = `<strong>${escapeHtml(question)}</strong>`;
-      const opts = document.getElementById("options");
-      opts.innerHTML = '';
+      const opts = document.getElementById("options"); opts.innerHTML = '';
       options.forEach((o, idx) => {
         const btn = document.createElement("button");
         btn.className = 'option-btn';
@@ -196,48 +183,31 @@
     socket.on("questionEnded", ({ results, correctIndexes }) => {
       const optionButtons = document.querySelectorAll('.option-btn');
       optionButtons.forEach((btn, i) => {
-        if (correctIndexes.includes(i)) {
-          btn.style.border = '3px solid #60a5fa';
-        } else {
-          btn.style.opacity = '0.6';
-        }
+        if (correctIndexes.includes(i)) btn.style.border = '3px solid #60a5fa';
+        else btn.style.opacity = '0.6';
       });
-
-      const meResult = (results || []).find(r => r.id === myId);
-      if (meResult) {
-        document.getElementById("answerStatus").innerText =
-          meResult.correct ? `Correct! +${meResult.awarded} pts` : `Wrong. +0 pts`;
-      } else {
-        document.getElementById("answerStatus").innerText = 'Question ended.';
-      }
+      const meResult = (results||[]).find(r => r.id === myId);
+      if (meResult) document.getElementById("answerStatus").innerText = meResult.correct ? `Correct! +${meResult.awarded} pts` : `Wrong. +0 pts`;
+      else document.getElementById("answerStatus").innerText = 'Question ended.';
     });
 
-    socket.on("errorMsg", msg => alert(msg));
     socket.on("kicked", () => {
       alert("You were kicked.");
-      localStorage.removeItem("roomCode");
-      localStorage.removeItem("playerName");
-      localStorage.removeItem("isOwner");
+      localStorage.removeItem("roomCode"); localStorage.removeItem("playerName"); localStorage.removeItem("isOwner");
       window.location.href = "/";
     });
     socket.on("roomClosed", () => {
       alert("Room closed (owner left).");
-      localStorage.removeItem("roomCode");
-      localStorage.removeItem("playerName");
-      localStorage.removeItem("isOwner");
+      localStorage.removeItem("roomCode"); localStorage.removeItem("playerName"); localStorage.removeItem("isOwner");
       window.location.href = "/";
     });
+    socket.on("errorMsg", (m) => alert(m || "Server error"));
 
     function selectOption(btn, idx) {
       if (answered) return;
       const already = selectedIndexes.includes(idx);
-      if (already) {
-        selectedIndexes = selectedIndexes.filter(i => i !== idx);
-        btn.classList.remove('selected');
-      } else {
-        selectedIndexes.push(idx);
-        btn.classList.add('selected');
-      }
+      if (already) { selectedIndexes = selectedIndexes.filter(i=>i!==idx); btn.classList.remove('selected'); }
+      else { selectedIndexes.push(idx); btn.classList.add('selected'); }
       renderSubmit();
     }
 
@@ -259,89 +229,51 @@
       socket.emit("submitAnswer", { code: roomCode, selections: selectedIndexes });
       answered = true;
       document.getElementById("answerStatus").innerText = 'Answer submitted. Waiting...';
-      const submitBtn = document.getElementById("submitBtn");
-      if (submitBtn) submitBtn.disabled = true;
+      const submitBtn = document.getElementById("submitBtn"); if (submitBtn) submitBtn.disabled = true;
     }
 
-    // owner modal + create question
     function openCreateModal() {
       document.getElementById('createModal').style.display = 'flex';
       if (!document.getElementById('optRows').childElementCount) {
-        addOptionRow('Option 1');
-        addOptionRow('Option 2');
-        addOptionRow('Option 3');
-        addOptionRow('Option 4');
+        addOptionRow('Option 1'); addOptionRow('Option 2'); addOptionRow('Option 3'); addOptionRow('Option 4');
       }
     }
-    function closeCreateModal() {
-      document.getElementById('createModal').style.display = 'none';
-      document.getElementById('cq_text').value = '';
-      document.getElementById('optRows').innerHTML = '';
-    }
+    function closeCreateModal() { document.getElementById('createModal').style.display = 'none'; document.getElementById('cq_text').value = ''; document.getElementById('optRows').innerHTML = ''; }
     function addOptionRow(defaultText='') {
       const container = document.getElementById('optRows');
-      const row = document.createElement('div');
-      row.className = 'option-row';
-      row.innerHTML = `
-        <input type="checkbox" class="opt-correct"/>
-        <input class="opt-text" placeholder="Answer text" style="flex:1" value="${defaultText}" />
-        <button onclick="this.parentNode.remove()">Remove</button>
-      `;
+      const row = document.createElement('div'); row.className = 'option-row';
+      row.innerHTML = `<input type="checkbox" class="opt-correct"/><input class="opt-text" placeholder="Answer text" style="flex:1" value="${defaultText}" /><button onclick="this.parentNode.remove()">Remove</button>`;
       container.appendChild(row);
     }
 
     function createQuestion() {
-      const q = document.getElementById('cq_text').value.trim();
-      if (!q) return alert('Add question text');
-      const optRows = Array.from(document.querySelectorAll('#optRows .option-row'));
-      if (!optRows.length) return alert('Add at least one option');
-      const options = optRows.map(r => r.querySelector('.opt-text').value.trim());
-      if (options.some(o => !o)) return alert('Fill all option text');
-      const correctIndexes = optRows
-        .map((r,i)=> r.querySelector('.opt-correct').checked ? i : -1)
-        .filter(i => i !== -1);
+      const q = document.getElementById('cq_text').value.trim(); if (!q) return alert('Add question text');
+      const optRows = Array.from(document.querySelectorAll('#optRows .option-row')); if (!optRows.length) return alert('Add at least one option');
+      const options = optRows.map(r => r.querySelector('.opt-text').value.trim()); if (options.some(o=>!o)) return alert('Fill all option text');
+      const correctIndexes = optRows.map((r,i)=> r.querySelector('.opt-correct').checked ? i : -1).filter(i=>i!==-1);
       if (!correctIndexes.length) return alert('Select at least one correct answer');
-
       const duration = Number(document.getElementById('cq_duration').value) || 10;
       const points = Number(document.getElementById('cq_points').value) || 1;
-
-      socket.emit('createQuestion', {
-        code: roomCode,
-        question: q,
-        options,
-        correctIndexes,
-        duration,
-        points
-      });
-
+      socket.emit('createQuestion', { code: roomCode, question: q, options, correctIndexes, duration, points });
       closeCreateModal();
     }
 
-    function endQuestionNow() {
-      socket.emit('endQuestionNow', roomCode);
-    }
+    function endQuestionNow() { socket.emit('endQuestionNow', roomCode); }
 
     // countdown
     let countdownInterval = null;
     function startCountdown(duration) {
       const timerEl = document.getElementById('timer');
-      let left = duration;
-      timerEl.innerText = `Time: ${left}s`;
+      let left = duration; timerEl.innerText = `Time: ${left}s`;
       if (countdownInterval) clearInterval(countdownInterval);
       countdownInterval = setInterval(()=>{
         left--;
-        if (left <= 0) {
-          clearInterval(countdownInterval);
-          timerEl.innerText = 'Time: 0s';
-        } else {
-          timerEl.innerText = `Time: ${left}s`;
-        }
+        if (left <= 0) { clearInterval(countdownInterval); timerEl.innerText = 'Time: 0s'; }
+        else timerEl.innerText = `Time: ${left}s`;
       }, 1000);
     }
 
-    function escapeHtml(s) {
-      return s.replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-    }
+    function escapeHtml(s) { return s.replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
   </script>
 </body>
 </html>
