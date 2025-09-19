@@ -2,16 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <title>Lobby</title>
+  <title>Quiz Lobby</title>
   <script src="/socket.io/socket.io.js"></script>
   <style>
     body { font-family: Arial, sans-serif; background: linear-gradient(135deg,#667eea,#764ba2); color: #fff; display:flex; align-items:center; justify-content:center; height:100vh; margin:0;}
-    .card { background: rgba(0,0,0,0.45); padding:24px; border-radius:12px; width:420px; text-align:center;}
-    input { width:80%; padding:10px; margin:8px 0; border-radius:8px; border:none; }
+    .card { background: rgba(0,0,0,0.45); padding:24px; border-radius:12px; width:460px; text-align:center;}
+    input { width:86%; padding:10px; margin:8px 0; border-radius:8px; border:none; font-size:14px; }
     button { padding:10px 16px; margin:6px; border-radius:8px; border:none; cursor:pointer; background:#ffca28; color:#222; }
     #lobbyUI { display:none; margin-top:12px; text-align:left; }
     .playerBox { background:#071427; padding:8px; margin:6px 0; border-radius:6px; display:flex; justify-content:space-between; align-items:center; }
-    .ownerBadge { color:#ffd700; font-weight:bold; }
+    .ownerBadge { color:#ffd700; font-weight:bold; margin-left:8px; font-size:12px; }
+    .small { font-size:12px; color:#ffefc6; }
+    #error { color:#ffaaaa; display:none; margin-top:8px; }
+    .code { font-weight:700; letter-spacing:2px; font-size:18px; margin-left:6px; }
   </style>
 </head>
 <body>
@@ -23,19 +26,27 @@
       <button id="createBtn">Create Room</button><br>
       <input id="roomCodeInput" placeholder="Enter room code to join" /><br>
       <button id="joinBtn">Join Room</button>
-      <p id="error" style="color:#ffaaaa; display:none;"></p>
+      <p id="error"></p>
+      <p class="small">Tip: room codes are case-insensitive. Owner controls appear only for the true owner.</p>
     </div>
 
     <div id="lobbyUI">
-      <div><strong>Room Code:</strong> <span id="roomCodeDisplay"></span></div>
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div><strong>Room Code:</strong> <span class="code" id="roomCodeDisplay"></span></div>
+        <div id="ownerInfo" class="small"></div>
+      </div>
+
       <div id="playersList" style="margin-top:12px;"></div>
-      <div style="margin-top:10px;">
-        <button id="startBtn" style="display:none;">Start Game</button>
+
+      <div style="margin-top:12px; display:flex; justify-content:space-between; align-items:center;">
+        <div id="startContainer"></div>
+        <div id="leaveContainer"></div>
       </div>
     </div>
   </div>
 
   <script>
+    // --- Config / helpers ---
     const socket = io();
     const createBtn = document.getElementById("createBtn");
     const joinBtn = document.getElementById("joinBtn");
@@ -46,130 +57,254 @@
     const joinUI = document.getElementById("joinUI");
     const roomCodeDisplay = document.getElementById("roomCodeDisplay");
     const playersList = document.getElementById("playersList");
-    const startBtn = document.getElementById("startBtn");
+    const startContainer = document.getElementById("startContainer");
+    const leaveContainer = document.getElementById("leaveContainer");
+    const ownerInfo = document.getElementById("ownerInfo");
 
     let currentRoom = null;
-    let amOwner = false;
+    let amOwnerLocal = false; // local claim (from create button or localStorage)
+    let mySocketId = null;
+    let serverOwnerId = null;
 
-    createBtn.onclick = () => {
-      const name = playerNameInput.value.trim();
-      if (!name) return showError("Enter your name");
-      socket.emit("createRoom", name, (res) => {
-        if (res?.success) {
-          currentRoom = res.code;
-          amOwner = true;
-          enterLobby();
-          localStorage.setItem("roomCode", currentRoom);
-          localStorage.setItem("playerName", name);
-          localStorage.setItem("isOwner", "true");
-        } else {
-          showError("Could not create room");
-        }
-      });
-    };
-
-    joinBtn.onclick = () => {
-      const name = playerNameInput.value.trim();
-      const code = (roomCodeInput.value || "").trim().toUpperCase();
-      if (!name || !code) return showError("Enter name and code");
-      socket.emit("joinRoom", { code, name, isOwner: false }, (res) => {
-        if (res?.success) {
-          currentRoom = res.code;
-          amOwner = false;
-          enterLobby();
-          localStorage.setItem("roomCode", currentRoom);
-          localStorage.setItem("playerName", name);
-          localStorage.setItem("isOwner", "false");
-        } else {
-          showError(res?.message || "Room not found");
-        }
-      });
-    };
-
-    function enterLobby() {
-      joinUI.style.display = "none";
-      lobbyUI.style.display = "block";
-      roomCodeDisplay.innerText = currentRoom;
-      startBtn.style.display = amOwner ? "inline-block" : "none";
-    }
-
-    socket.on("playerList", ({ players, owner }) => {
-      // show players
-      playersList.innerHTML = "";
-      players.forEach(p => {
-        const div = document.createElement("div");
-        div.className = "playerBox";
-        div.innerHTML = `<div>${p.name}</div><div>${p.score ?? 0}${p.id === owner ? " <span class='ownerBadge'>(Owner)</span>" : ""}</div>`;
-        // if I'm owner, show kick buttons
-        const meIsOwner = (localStorage.getItem("isOwner")==="true") && owner === socket.id;
-        if (owner === socket.id && localStorage.getItem("isOwner")==="true") {
-          // ownerUI showing start button is handled by startBtn; kick button logic below
-        }
-        if (localStorage.getItem("isOwner")==="true" && owner === socket.id && p.id !== socket.id) {
-          const kick = document.createElement("button");
-          kick.innerText = "Kick";
-          kick.onclick = () => socket.emit("kickPlayer", { code: currentRoom, targetId: p.id });
-          div.appendChild(kick);
-        }
-        playersList.appendChild(div);
-      });
-    });
-
-    startBtn.onclick = () => {
-      if (!currentRoom) return;
-      socket.emit("startGame", currentRoom);
-    };
-
-    // redirect lobby -> game
-    socket.on("goToGamePage", () => {
-      // store required info and redirect
-      window.location.href = "/game.html";
-    });
-
-    socket.on("kicked", () => {
-      alert("You were kicked from the room");
-      localStorage.removeItem("roomCode");
-      localStorage.removeItem("playerName");
-      localStorage.removeItem("isOwner");
-      location.reload();
-    });
-
-    socket.on("roomClosed", () => {
-      alert("Room closed (owner left)");
-      localStorage.removeItem("roomCode");
-      localStorage.removeItem("playerName");
-      localStorage.removeItem("isOwner");
-      location.reload();
-    });
-
+    // small UI helpers
     function showError(msg) {
       errorBox.innerText = msg;
       errorBox.style.display = "block";
-      setTimeout(()=> errorBox.style.display = "none", 4000);
+      setTimeout(()=> errorBox.style.display = "none", 4500);
+    }
+    function setLobbyVisible(code, amOwner) {
+      joinUI.style.display = "none";
+      lobbyUI.style.display = "block";
+      roomCodeDisplay.innerText = code;
+      amOwnerLocal = amOwner;
+      renderStartButton(); // show/hide based on server owner (updated by playerList)
+      createLeaveButton();
     }
 
-    // Auto rejoin if localStorage present
-    (function tryAutoRejoin() {
-      const savedCode = localStorage.getItem("roomCode");
-      const savedName = localStorage.getItem("playerName");
-      const savedOwner = localStorage.getItem("isOwner") === "true";
-      if (savedCode && savedName) {
-        currentRoom = savedCode;
-        playerNameInput.value = savedName;
-        // emit joinRoom and pass isOwner so server reassigns owner if appropriate
-        socket.emit("joinRoom", { code: savedCode, name: savedName, isOwner: savedOwner }, (res) => {
-          if (res?.success) {
-            amOwner = savedOwner;
-            enterLobby();
-          } else {
-            // clear invalid saved state
-            localStorage.removeItem("roomCode");
-            localStorage.removeItem("playerName");
-            localStorage.removeItem("isOwner");
-          }
+    // Ensure socket connected (returns a Promise)
+    function ensureSocketConnected() {
+      if (socket.connected) return Promise.resolve();
+      return new Promise(resolve => socket.once('connect', resolve));
+    }
+
+    // --- REST helper with fallback to socket flow ---
+    async function createRoomFlow(name) {
+      try {
+        const res = await fetch('/api/create', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+        if (!res.ok) throw new Error('REST create failed');
+        const j = await res.json();
+        return { ok: true, code: j.code };
+      } catch (e) {
+        // fallback to socket-only create (older server)
+        return new Promise(resolve => {
+          socket.emit('createRoomSocket', { name }, (resp) => {
+            if (resp?.success) resolve({ ok:true, code: resp.code });
+            else resolve({ ok:false, message: resp?.message || 'Socket create failed' });
+          });
         });
       }
-    })();
+    }
+
+    async function joinRoomFlow(code, name) {
+      code = String(code || '').trim().toUpperCase();
+      try {
+        const res = await fetch('/api/join', { method:'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ code, name }) });
+        if (!res.ok) {
+          const j = await res.json().catch(()=>({ error: 'Join failed' }));
+          return { ok:false, message: j.error || j.message || 'Join failed' };
+        }
+        return { ok:true, code };
+      } catch (e) {
+        // fallback to socket join validation - still try socket join directly
+        return { ok:true, code }; // we let socket emit handle the real join checks
+      }
+    }
+
+    // --- Socket-assisted join (emits joinRoom) ---
+    function socketJoin(code, name, isOwnerClaim=false) {
+      return new Promise(resolve => {
+        ensureSocketConnected().then(() => {
+          socket.emit('joinRoom', { code, name, isOwner: !!isOwnerClaim }, (resp) => {
+            resolve(resp || { success:false, message: 'No response' });
+          });
+        });
+      });
+    }
+
+    // --- UI actions ---
+    createBtn.onclick = async () => {
+      const name = playerNameInput.value.trim();
+      if (!name) return showError('Enter your name');
+      // create via REST (preferred)
+      const createResp = await createRoomFlow(name);
+      if (!createResp.ok) {
+        showError(createResp.message || 'Could not create room');
+        return;
+      }
+      const code = createResp.code;
+      // now socket-join and claim owner (server will assign owner to this socket)
+      const joinResp = await socketJoin(code, name, true);
+      if (!joinResp.success) {
+        showError(joinResp.message || 'Socket join failed after create');
+        return;
+      }
+      currentRoom = code;
+      localStorage.setItem('roomCode', currentRoom);
+      localStorage.setItem('playerName', name);
+      localStorage.setItem('isOwner', 'true');
+      setLobbyVisible(currentRoom, true);
+    };
+
+    joinBtn.onclick = async () => {
+      const name = playerNameInput.value.trim();
+      const codeRaw = roomCodeInput.value.trim();
+      if (!name || !codeRaw) return showError('Enter both name and room code');
+      const code = codeRaw.toUpperCase().trim();
+
+      const pre = await joinRoomFlow(code, name);
+      if (!pre.ok) {
+        showError(pre.message || 'Cannot join room');
+        return;
+      }
+
+      // now socket join
+      const joinResp = await socketJoin(code, name, false);
+      if (!joinResp.success) {
+        showError(joinResp.message || 'Socket join failed');
+        return;
+      }
+
+      currentRoom = code;
+      localStorage.setItem('roomCode', currentRoom);
+      localStorage.setItem('playerName', name);
+      localStorage.setItem('isOwner', 'false');
+      setLobbyVisible(currentRoom, false);
+    };
+
+    // render list of players and owner-specific UI
+    function renderPlayers(players, ownerId) {
+      serverOwnerId = ownerId;
+      playersList.innerHTML = '';
+      players.forEach(p => {
+        const div = document.createElement('div');
+        div.className = 'playerBox';
+        const left = document.createElement('div');
+        left.innerText = p.name;
+        const right = document.createElement('div');
+        right.innerHTML = `${p.score ?? 0} ${p.id === ownerId ? "<span class='ownerBadge'>(Owner)</span>": ""}`;
+        div.appendChild(left);
+        div.appendChild(right);
+
+        // If current socket is server owner, show Kick button for others
+        if (serverOwnerId === mySocketId && p.id !== mySocketId) {
+          const kickBtn = document.createElement('button');
+          kickBtn.innerText = 'Kick';
+          kickBtn.onclick = () => {
+            socket.emit('kickPlayer', { code: currentRoom, targetId: p.id });
+          };
+          div.appendChild(kickBtn);
+        }
+
+        playersList.appendChild(div);
+      });
+
+      // show owner info label
+      ownerInfo.innerText = serverOwnerId === mySocketId ? 'You are owner' : '';
+      renderStartButton();
+    }
+
+    function renderStartButton() {
+      startContainer.innerHTML = '';
+      if (!currentRoom) return;
+      // Only show Start if server owner is our socket id
+      if (serverOwnerId === mySocketId) {
+        const startBtn = document.createElement('button');
+        startBtn.innerText = 'Start Game';
+        startBtn.onclick = () => socket.emit('startGame', currentRoom);
+        startContainer.appendChild(startBtn);
+      }
+    }
+
+    function createLeaveButton() {
+      leaveContainer.innerHTML = '';
+      if (!currentRoom) return;
+      const leaveBtn = document.createElement('button');
+      leaveBtn.innerText = 'Leave';
+      leaveBtn.onclick = () => {
+        // simple leave: reload and clear saved state
+        localStorage.removeItem('roomCode');
+        localStorage.removeItem('playerName');
+        localStorage.removeItem('isOwner');
+        location.reload();
+      };
+      leaveContainer.appendChild(leaveBtn);
+    }
+
+    // --- socket events ---
+    socket.on('connect', () => {
+      mySocketId = socket.id;
+      // if we have saved room info, try to rejoin (claiming owner if was owner)
+      tryAutoRejoin();
+    });
+
+    socket.on('playerList', ({ players, owner }) => {
+      renderPlayers(players || [], owner);
+    });
+
+    socket.on('goToGamePage', () => {
+      // server asked to start: redirect all players
+      window.location.href = '/game.html';
+    });
+
+    socket.on('kicked', () => {
+      alert('You were kicked by the owner.');
+      localStorage.removeItem('roomCode');
+      localStorage.removeItem('playerName');
+      localStorage.removeItem('isOwner');
+      location.reload();
+    });
+
+    socket.on('roomClosed', () => {
+      alert('Room closed (owner left)');
+      localStorage.removeItem('roomCode');
+      localStorage.removeItem('playerName');
+      localStorage.removeItem('isOwner');
+      location.reload();
+    });
+
+    socket.on('errorMsg', (m) => {
+      showError(m || 'Error from server');
+    });
+
+    // --- Auto rejoin on load if saved ---
+    async function tryAutoRejoin() {
+      const savedCode = localStorage.getItem('roomCode');
+      const savedName = localStorage.getItem('playerName');
+      const savedIsOwner = localStorage.getItem('isOwner') === 'true';
+      if (!savedCode || !savedName) return;
+
+      // first try REST join validation (non-blocking - server might not have /api/join)
+      try {
+        await fetch('/api/join', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code: savedCode, name: savedName }) });
+      } catch(e) {
+        // ignore - fallback to socket join
+      }
+
+      // then try socket join (reclaim owner if saved)
+      const resp = await socketJoin(savedCode, savedName, savedIsOwner);
+      if (resp?.success) {
+        currentRoom = savedCode;
+        setLobbyVisible(currentRoom, savedIsOwner);
+      } else {
+        // invalid saved state -> clear
+        localStorage.removeItem('roomCode');
+        localStorage.removeItem('playerName');
+        localStorage.removeItem('isOwner');
+        console.warn('Auto-rejoin failed:', resp);
+      }
+    }
+
+    // optional debug: press Ctrl+Shift+I to open devtools and check network logs
   </script>
 </body>
 </html>
