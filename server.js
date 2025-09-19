@@ -1,24 +1,32 @@
+// server.js
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
-const crypto = require("crypto");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+const PORT = process.env.PORT || 10000;
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-const rooms = {}; // { CODE: { ownerId, players:[{id,name,score}], started:false } }
+// Debug endpoint to see rooms in memory
+app.get("/api/debugRooms", (req, res) => res.json(rooms));
 
-// generate random 4-letter code
+// -------------------- ROOM STORAGE --------------------
+const rooms = {}; // rooms[code] = { ownerId, players[], started, pendingOwnerName }
+
 function genCode() {
-  return crypto.randomBytes(2).toString("hex").toUpperCase();
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// REST: create room
+// -------------------- REST ENDPOINTS --------------------
+
+// Create a room (with pending owner name until socket joins)
 app.post("/api/create", (req, res) => {
   const name = req.body.name?.trim();
   if (!name) return res.status(400).json({ error: "Missing name" });
@@ -29,129 +37,119 @@ app.post("/api/create", (req, res) => {
   } while (rooms[code]);
 
   rooms[code] = {
-    ownerId: null, // assigned later when socket joins
+    ownerId: null,
     players: [],
     started: false,
-    currentQ: null,
+    currentQuestion: null,
+    timer: null,
+    pendingOwnerName: name
   };
 
   res.json({ code });
 });
 
-// REST: join validation
+// Validate join (before socket connects)
 app.post("/api/join", (req, res) => {
-  const code = String(req.body.code || "").toUpperCase();
-  const name = req.body.name?.trim();
-  if (!rooms[code]) return res.status(404).json({ error: "Room not found" });
-  if (!name) return res.status(400).json({ error: "Missing name" });
-  res.json({ ok: true });
+  let { code, name } = req.body || {};
+  if (!code || !name) return res.status(400).json({ error: "Missing code or name" });
+
+  code = String(code).trim().toUpperCase();
+  const room = rooms[code];
+  if (!room) return res.status(404).json({ error: "Room not found" });
+
+  if (room.started && !room.players.find(p => p.name === name)) {
+    return res.status(400).json({ error: "Game already started" });
+  }
+
+  if (room.players.find(p => p.name === name)) {
+    return res.status(409).json({ error: "Name already taken" });
+  }
+
+  return res.json({ ok: true });
 });
 
-// --- socket.io ---
+// -------------------- SOCKET HANDLERS --------------------
 io.on("connection", (socket) => {
-  console.log("connected", socket.id);
+  console.log("socket connected:", socket.id);
 
-  socket.on("createRoomSocket", ({ name }, cb) => {
-    const code = genCode();
-    rooms[code] = {
-      ownerId: socket.id,
-      players: [{ id: socket.id, name, score: 0 }],
-      started: false,
-      currentQ: null,
-    };
-    socket.join(code);
-    cb({ success: true, code });
-    io.to(code).emit("playerList", { players: rooms[code].players, owner: rooms[code].ownerId });
-  });
-
+  // Join a room
   socket.on("joinRoom", ({ code, name, isOwner }, cb) => {
-    code = String(code || "").toUpperCase();
-    if (!rooms[code]) return cb({ success: false, message: "Room not found" });
+    code = String(code || "").trim().toUpperCase();
     const room = rooms[code];
-    if (room.started) return cb({ success: false, message: "Game already started" });
+    if (!room) return cb?.({ success: false, message: "Room not found" });
 
-    if (isOwner && !room.ownerId) {
+    // Claim ownership if this socket is supposed to be owner
+    if (isOwner && !room.ownerId && room.pendingOwnerName === name) {
       room.ownerId = socket.id;
+      delete room.pendingOwnerName;
     }
 
-    const existing = room.players.find(p => p.id === socket.id);
-    if (!existing) {
-      room.players.push({ id: socket.id, name, score: 0 });
+    // Game already started check
+    if (room.started) {
+      const existing = room.players.find(p => p.name === name);
+      if (!existing) return cb?.({ success: false, message: "Game already started" });
+      // reconnect logic
+      existing.id = socket.id;
+      socket.join(code);
+      io.to(code).emit("playerList", { players: room.players, owner: room.ownerId });
+      return cb?.({ success: true, code, owner: room.ownerId, players: room.players });
     }
 
+    // prevent name collision
+    if (room.players.find(p => p.name === name)) {
+      return cb?.({ success: false, message: "Name already taken" });
+    }
+
+    // add player
+    room.players.push({ id: socket.id, name, score: 0 });
     socket.join(code);
-    cb({ success: true, owner: room.ownerId, players: room.players });
+
     io.to(code).emit("playerList", { players: room.players, owner: room.ownerId });
+    cb?.({ success: true, code, owner: room.ownerId, players: room.players });
   });
 
-  socket.on("startGame", (code) => {
-    if (!rooms[code]) return;
-    const room = rooms[code];
-    if (room.ownerId !== socket.id) return;
-    room.started = true;
-    io.to(code).emit("goToGamePage");
-  });
-
+  // Kick player
   socket.on("kickPlayer", ({ code, targetId }) => {
     const room = rooms[code];
-    if (!room || room.ownerId !== socket.id) return;
+    if (!room) return;
+    if (room.ownerId !== socket.id) return;
+
     room.players = room.players.filter(p => p.id !== targetId);
     io.to(targetId).emit("kicked");
     io.to(code).emit("playerList", { players: room.players, owner: room.ownerId });
   });
 
-  socket.on("createQuestion", ({ code, question, options, correctIndexes, duration, points }) => {
+  // Start game
+  socket.on("startGame", (code) => {
     const room = rooms[code];
-    if (!room || room.ownerId !== socket.id) return;
-    room.currentQ = { question, options, correctIndexes, duration, points, answers: {} };
-    io.to(code).emit("questionStarted", { question, options, duration });
-    setTimeout(() => endQuestion(code), duration * 1000);
+    if (!room) return;
+    if (room.ownerId !== socket.id) return;
+
+    room.started = true;
+    io.to(code).emit("goToGamePage");
+    io.to(code).emit("playerList", { players: room.players, owner: room.ownerId });
   });
 
-  socket.on("submitAnswer", ({ code, selections }) => {
-    const room = rooms[code];
-    if (!room?.currentQ) return;
-    room.currentQ.answers[socket.id] = selections;
-  });
-
-  socket.on("endQuestionNow", (code) => {
-    const room = rooms[code];
-    if (room?.ownerId === socket.id) endQuestion(code);
-  });
-
+  // Disconnect handling
   socket.on("disconnect", () => {
-    for (const code in rooms) {
+    for (const code of Object.keys(rooms)) {
       const room = rooms[code];
-      room.players = room.players.filter(p => p.id !== socket.id);
-      if (room.ownerId === socket.id) {
-        io.to(code).emit("roomClosed");
-        delete rooms[code];
-      } else {
-        io.to(code).emit("playerList", { players: room.players, owner: room.ownerId });
+      if (!room) continue;
+      const idx = room.players.findIndex(p => p.id === socket.id);
+      if (idx !== -1) {
+        const wasOwner = room.ownerId === socket.id;
+        room.players.splice(idx, 1);
+        if (wasOwner) {
+          io.to(code).emit("roomClosed");
+          delete rooms[code];
+        } else {
+          io.to(code).emit("playerList", { players: room.players, owner: room.ownerId });
+        }
+        break;
       }
     }
   });
 });
 
-function endQuestion(code) {
-  const room = rooms[code];
-  if (!room?.currentQ) return;
-  const q = room.currentQ;
-
-  const results = [];
-  for (const player of room.players) {
-    const selections = q.answers[player.id] || [];
-    const correct = selections.length === q.correctIndexes.length &&
-      selections.every(idx => q.correctIndexes.includes(idx));
-    const awarded = correct ? q.points : 0;
-    player.score += awarded;
-    results.push({ id: player.id, correct, awarded });
-  }
-
-  io.to(code).emit("questionEnded", { results, correctIndexes: q.correctIndexes });
-  io.to(code).emit("leaderboard", room.players);
-  room.currentQ = null;
-}
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log("Server on " + PORT));
+// -------------------- START SERVER --------------------
+server.listen(PORT, () => console.log(`Server listening on ${PORT}`));
