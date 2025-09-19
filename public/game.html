@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Game Page</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background: #000; color: #fff; text-align: center; padding: 40px; }
+    .player-card { margin: 10px auto; padding: 15px; width: 200px; background: #222; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Game Started!</h1>
+  <div id="players"></div>
+
+  <script>
+    const players = JSON.parse(localStorage.getItem("players")) || [];
+    const playersDiv = document.getElementById("players");
+
+    players.forEach(player => {
+      const card = document.createElement("div");
+      card.className = "player-card";
+      card.innerText = player.name;
+      playersDiv.appendChild(card);
+    });
+  </script>
+</body>
+</html>
