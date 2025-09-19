@@ -109,13 +109,25 @@
         if (!res?.success) {
           alert(res?.message || "Failed to join room. Returning to lobby.");
           window.location.href = "/";
+          return;
+        }
+        // immediate UI update from callback (prevents owner UI race)
+        if (res.owner === myId) document.getElementById("ownerArea").style.display = "block";
+        else document.getElementById("ownerArea").style.display = "none";
+
+        // render player list immediately
+        if (res.players) {
+          renderPlayersList(res.players, res.owner);
         }
       });
     });
 
     // update players + show owner controls only for the server-side owner
     socket.on("playerList", ({ players, owner }) => {
-      // show players
+      renderPlayersList(players || [], owner);
+    });
+
+    function renderPlayersList(players, owner) {
       const playersList = document.getElementById("playersList");
       playersList.innerHTML = '';
       players.forEach(p => {
@@ -125,19 +137,19 @@
         playersList.appendChild(el);
       });
 
-      // show owner area only if server says this socket is the owner
+      // owner UI
       if (owner === myId) {
         document.getElementById("ownerArea").style.display = "block";
       } else {
         document.getElementById("ownerArea").style.display = "none";
       }
 
-      // update leaderboard
+      // update leaderboard too
       renderLeaderboard(players);
-    });
+    }
 
     socket.on("leaderboard", (leader) => {
-      renderLeaderboard(leader);
+      renderLeaderboard(leader || []);
       if (leader && leader.length>0) {
         const top = leader[0];
         showPointShower(`${top.name} is leading — ${top.score} pts`);
@@ -191,7 +203,7 @@
         }
       });
 
-      const meResult = results.find(r => r.id === myId);
+      const meResult = (results || []).find(r => r.id === myId);
       if (meResult) {
         document.getElementById("answerStatus").innerText =
           meResult.correct ? `Correct! +${meResult.awarded} pts` : `Wrong. +0 pts`;
